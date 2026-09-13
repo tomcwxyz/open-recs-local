@@ -19,10 +19,10 @@ type ProgressState = {
  * short prose note on the right explaining what the pipeline does after
  * submit. No card chrome — a single rule above and below.
  *
- * After a successful upload, the returned `jobId` opens an SSE stream
- * (`/api/jobs/[id]/stream`) so the user sees live pipeline progress without
- * manually refreshing. The stream closes automatically when the source
- * reaches `ready` or `failed`.
+ * Pipeline events are keyed by `sourceId`, not by the initial pg-boss job id:
+ * parse, extract and embed are separate queue jobs, while the source id is the
+ * stable identity across all three stages. The stream closes automatically
+ * when the source reaches `ready` or `failed`.
  */
 export function SourceUploadForm() {
   const router = useRouter();
@@ -62,8 +62,9 @@ export function SourceUploadForm() {
         return;
       }
       const body = (await res.json()) as { sourceId: string; jobId: string };
-      // Wire SSE to show live pipeline progress.
-      subscribeToJob(body.jobId);
+      // Every pipeline handler emits against sourceId, so subscribe to that
+      // stable channel rather than the first queue job's id.
+      subscribeToPipeline(body.sourceId);
       if (fileRef.current) fileRef.current.value = '';
       if (titleRef.current) titleRef.current.value = '';
       router.refresh();
@@ -108,9 +109,9 @@ export function SourceUploadForm() {
     startUpload(file, title);
   }
 
-  function subscribeToJob(jobId: string) {
+  function subscribeToPipeline(sourceId: string) {
     setProgress({ phase: null, percent: 0, message: null });
-    const es = new EventSource(`/api/jobs/${jobId}/stream`);
+    const es = new EventSource(`/api/jobs/${sourceId}/stream`);
 
     es.onmessage = (e) => {
       try {
@@ -119,7 +120,11 @@ export function SourceUploadForm() {
           | { type: 'progress'; percent: number; message?: string }
           | { type: 'error'; message: string };
         if (event.type === 'phase') {
-          setProgress((p) => ({ phase: event.phase, percent: p?.percent ?? 0, message: p?.message ?? null }));
+          setProgress((p) => ({
+            phase: event.phase,
+            percent: p?.percent ?? 0,
+            message: p?.message ?? null,
+          }));
           if (event.phase === 'ready' || event.phase === 'failed') {
             es.close();
             // Final refresh so the catalogue reflects the completed state.
@@ -132,7 +137,11 @@ export function SourceUploadForm() {
             message: event.message ?? null,
           }));
         } else if (event.type === 'error') {
-          setProgress((p) => ({ phase: 'failed', percent: p?.percent ?? 0, message: event.message }));
+          setProgress((p) => ({
+            phase: 'failed',
+            percent: p?.percent ?? 0,
+            message: event.message,
+          }));
           es.close();
         }
       } catch {
@@ -245,7 +254,7 @@ export function SourceUploadForm() {
               <span>
                 <span className="font-medium">Parse.</span>{' '}
                 <span className="font-serif italic text-muted-foreground">
-                  The PDF is OCRed into a canonical markdown copy.
+                  The PDF is parsed into a canonical, page-aware copy.
                 </span>
               </span>
             </li>
