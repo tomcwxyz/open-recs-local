@@ -5,19 +5,33 @@ import {
   recommendations,
   recommendationStatuses,
   sourceFiles,
+  sourcePages,
   sources,
 } from '@/lib/db/schema';
 import {
+  RecommendationCandidatesSchema,
+  RecommendationEnrichmentsSchema,
   RecommendationsSchema,
   SourceMetadataSchema,
+  type RecommendationCandidate,
+  type RecommendationEnrichment,
   type RecommendationInput,
   type SourceMetadataOutput,
 } from '@/lib/services/extraction-schema';
+import { mergeCandidateEnrichments } from '@/lib/services/extraction-enrichment';
 import { detectRecommendationSections } from '@/lib/services/extraction-sections';
+import {
+  applyWindowProvenance,
+  buildExtractionWindows,
+  dedupeRecommendations,
+  type ExtractionWindow,
+} from '@/lib/services/extraction-windows';
 import {
   buildPass1Prompt,
   buildPass2LooserPrompt,
   buildPass2StrictPrompt,
+  buildRecommendationCandidatePrompt,
+  buildRecommendationEnrichmentPrompt,
   type TaxonomySlugLists,
 } from '@/lib/services/extraction-prompts';
 import {
@@ -53,14 +67,11 @@ import {
 import type { RepoContext } from '@/lib/repositories/types';
 
 const MAX_PASS1_MARKDOWN = 10_000;
-// Pass 2 used to truncate at 100k chars (~25k tokens), which is more than
-// any local 8B model can chew through in a reasonable time on Apple
-// Silicon — a 122k-char doc took 6+ minutes and intermittently left the
-// worker stuck on a hung fetch. 30k chars (~7.5k tokens) fits in a 12k
-// context window and lets a single Pass 2 call finish in roughly a
-// minute. Sources with explicit rec sections usually return far less
-// than this from `detectRecommendationSections` anyway.
+// Retained only for legacy/fake sources that do not have real source_pages.
+// Real parsed sources now use bounded page-aware windows below, so their tail
+// is never dropped just because the document is longer than one prompt.
 const MAX_PASS2_MARKDOWN = 30_000;
+const ENRICHMENT_BATCH_SIZE = 8;
 
 function fixtureKeyFromStorageKey(storageKey: string): string {
   const filename = storageKey.split('/').pop() ?? storageKey;
@@ -80,26 +91,35 @@ function parsePublicationDate(input: string | null): Date | null {
   return parsed;
 }
 
+function windowLabel(window: ExtractionWindow): string {
+  if (window.startPage === window.endPage) return `page ${window.startPage}`;
+  return `pages ${window.startPage}-${window.endPage}`;
+}
+
 /**
- * `source.extract` handler — two-pass, section-aware.
+ * `source.extract` handler — metadata + page-aware recommendation extraction.
  *
- * Pass 1: source metadata (summary, authors, dates, taxonomies for the
- * source itself). Reads the first ~10k chars of canonical markdown so the
- * LLM sees front matter + executive summary without the whole document.
+ * Pass 1: source metadata (summary, authors, dates, source-level taxonomies).
+ * Reads the first ~10k chars of canonical markdown so the model sees front
+ * matter + executive summary without receiving the whole document.
  *
- * Pass 2: recommendations. Detects recommendation-shaped headings; if
- * found, sends just those sections with a strict prompt; otherwise sends
- * the (truncated) full document with a looser prompt. Persists every rec
- * with its multi-axis tags + priority_timescale FK + confidence.
+ * Pass 2A (real parsed sources): identify recommendation candidates in small,
+ * overlapping page windows. This task intentionally has no taxonomy lists or
+ * classification fields: the local model only decides what is actionable,
+ * preserves the recommendation text, and anchors it to explicit `[PAGE N]`
+ * markers. Candidates are deduplicated across overlapping windows.
  *
- * Idempotency: pg-boss retries trigger a full re-run. Both passes are
- * idempotent — Pass 1 UPDATEs source columns and calls `replaceSource*`
- * (set membership, not append); Pass 2 deletes existing recs for the
- * source before inserting, and `replaceRecommendation*` is set membership.
+ * Pass 2B: enrich the deduplicated candidates in batches with taxonomy,
+ * target organisation, priority and confidence. Enrichment is joined back by
+ * deterministic candidate index and cannot rewrite title/body/page text.
  *
- * Unknown slugs: the LLM is asked to coin a new slug when no listed slug
- * fits. `resolveOrCreate*` auto-creates those with `unverified=true` so
- * an admin can promote / rename / merge / delete via /admin/tags (PR 3).
+ * Fake/legacy compatibility: fixture-backed fake LLMs and old sources with no
+ * `source_pages` keep the historical combined section-aware Pass 2 route.
+ *
+ * Local concurrency: a 16 GB local inference host runs metadata, page windows
+ * and enrichment sequentially. Hosted mode may run Pass 1 alongside the
+ * recommendation sequence, but page/enrichment batches themselves stay
+ * bounded instead of launching an unbounded fan-out of model calls.
  */
 export async function extractHandler(
   ctx: JobContext,
@@ -118,26 +138,28 @@ export async function extractHandler(
     }
     const canonicalMarkdown = sourceRow.canonical ?? '';
 
-    // Locate the original upload so the fake LLM provider can find the
-    // matching fixture file. Real LLM adapters ignore `key`.
-    const fileRows = await ctx.db
-      .select({ storageKey: sourceFiles.storageKey })
-      .from(sourceFiles)
-      .where(and(eq(sourceFiles.sourceId, sourceId), eq(sourceFiles.role, 'original')))
-      .orderBy(asc(sourceFiles.createdAt))
-      .limit(1);
-    const fixtureKey = fileRows[0] ? fixtureKeyFromStorageKey(fileRows[0].storageKey) : sourceRow.slug;
+    const [fileRows, pageRows] = await Promise.all([
+      ctx.db
+        .select({ storageKey: sourceFiles.storageKey })
+        .from(sourceFiles)
+        .where(and(eq(sourceFiles.sourceId, sourceId), eq(sourceFiles.role, 'original')))
+        .orderBy(asc(sourceFiles.createdAt))
+        .limit(1),
+      ctx.db
+        .select({ pageNumber: sourcePages.pageNumber, markdown: sourcePages.markdown })
+        .from(sourcePages)
+        .where(eq(sourcePages.sourceId, sourceId))
+        .orderBy(asc(sourcePages.pageNumber)),
+    ]);
+    const fixtureKey = fileRows[0]
+      ? fixtureKeyFromStorageKey(fileRows[0].storageKey)
+      : sourceRow.slug;
 
-    // RepoContext for the taxonomy + tag-membership repo functions. Uses
-    // the same db handle as the rest of the handler; auth is system context
-    // because extraction runs under the worker, not a user request.
     const repoCtx: RepoContext = {
       db: ctx.db,
       auth: { user: { id: 'system', name: 'system' }, roles: ['admin'], isSystem: true },
     };
 
-    // Load every taxonomy axis up front. The slugs are interpolated into
-    // both prompts so the LLM picks from known vocabulary.
     const [
       themeRows,
       sourceTypeRows,
@@ -165,36 +187,178 @@ export async function extractHandler(
       priority_timescale: priorityTimescaleRows.map((r) => r.slug),
     };
 
-    // ----- Pass 1 + Pass 2: Run in parallel --------------------------------
-    // Both LLM calls are independent, so run concurrently for ~2x speedup.
-    // If either fails, we propagate the error (both must succeed for valid output).
     const pass1Input = truncate(canonicalMarkdown, MAX_PASS1_MARKDOWN);
-    const section = detectRecommendationSections(canonicalMarkdown);
-    const pass2Input = truncate(section.processText, MAX_PASS2_MARKDOWN);
-    const pass2System =
-      section.mode === 'sections'
-        ? buildPass2StrictPrompt(taxonomySlugs)
-        : buildPass2LooserPrompt(taxonomySlugs);
-
-    const [pass1Result, pass2Result] = await Promise.all([
+    const runPass1 = () =>
       ctx.providers.llm.generateStructured({
         prompt: `Extract the source-level metadata for the following document.\n\n---\n${pass1Input}`,
         system: buildPass1Prompt(taxonomySlugs),
         schema: SourceMetadataSchema,
         key: `${fixtureKey}:metadata`,
-      }),
+      });
+
+    // The fake provider is fixture-keyed and intentionally represents one
+    // whole-document response. Keep it on the legacy route even though fake
+    // OCR creates page rows in E2E. Every real provider uses page windows as
+    // soon as usable parsed pages exist.
+    const usablePageRows = pageRows.filter((page) => page.markdown.trim().length > 0);
+    const usePageWindows = usablePageRows.length > 0 && ctx.providers.llm.name !== 'fake';
+
+    const section = detectRecommendationSections(canonicalMarkdown);
+    const legacyPass2Input = truncate(section.processText, MAX_PASS2_MARKDOWN);
+    const legacyPass2System =
+      section.mode === 'sections'
+        ? buildPass2StrictPrompt(taxonomySlugs)
+        : buildPass2LooserPrompt(taxonomySlugs);
+    const runLegacyPass2 = () =>
       ctx.providers.llm.generateStructured({
-        prompt: `Extract every actionable recommendation from the text below.\n\n---\n${pass2Input}`,
-        system: pass2System,
+        prompt: `Extract every actionable recommendation from the text below.\n\n---\n${legacyPass2Input}`,
+        system: legacyPass2System,
         schema: RecommendationsSchema,
         key: fixtureKey,
-      }),
-    ]);
+      });
 
-    const metadata: SourceMetadataOutput = pass1Result.value;
-    const recs: RecommendationInput[] = pass2Result.value.recommendations;
+    const windows = usePageWindows
+      ? buildExtractionWindows(
+          usablePageRows.map((page) => ({
+            pageNumber: page.pageNumber,
+            markdown: page.markdown,
+          })),
+        )
+      : [];
 
-    // ----- Source metadata (from Pass 1) — all 5 axes in parallel ---------
+    const runCandidateExtraction = async (): Promise<RecommendationCandidate[]> => {
+      const candidates: RecommendationCandidate[] = [];
+      for (let index = 0; index < windows.length; index += 1) {
+        const window = windows[index]!;
+        const percent = Math.min(65, 45 + Math.round(((index + 1) / windows.length) * 20));
+        await ctx.emit(sourceId, {
+          type: 'progress',
+          percent,
+          message: `finding recommendations ${index + 1}/${windows.length} (${windowLabel(window)})`,
+        });
+
+        const result = await ctx.providers.llm.generateStructured({
+          prompt: `Find actionable recommendations in this page window.\n\n---\n${window.text}`,
+          system: buildRecommendationCandidatePrompt(),
+          schema: RecommendationCandidatesSchema,
+          key: `${fixtureKey}:candidates-${window.index}`,
+        });
+
+        for (const recommendation of result.value.recommendations) {
+          candidates.push(applyWindowProvenance(recommendation, window));
+        }
+      }
+      return dedupeRecommendations(candidates);
+    };
+
+    const runCandidateEnrichment = async (
+      candidates: RecommendationCandidate[],
+    ): Promise<RecommendationInput[]> => {
+      if (candidates.length === 0) return [];
+
+      const enrichments: RecommendationEnrichment[] = [];
+      const totalBatches = Math.ceil(candidates.length / ENRICHMENT_BATCH_SIZE);
+      for (let offset = 0, batchNumber = 0; offset < candidates.length; offset += ENRICHMENT_BATCH_SIZE) {
+        batchNumber += 1;
+        const batch = candidates.slice(offset, offset + ENRICHMENT_BATCH_SIZE);
+        const indexedBatch = batch.map((candidate, localIndex) => ({
+          candidate_index: offset + localIndex,
+          title: candidate.title,
+          body: candidate.body,
+          page_start: candidate.page_start ?? null,
+          page_end: candidate.page_end ?? null,
+        }));
+        const percent = Math.min(78, 65 + Math.round((batchNumber / totalBatches) * 13));
+        await ctx.emit(sourceId, {
+          type: 'progress',
+          percent,
+          message: `classifying recommendations ${batchNumber}/${totalBatches}`,
+        });
+
+        const result = await ctx.providers.llm.generateStructured({
+          prompt: [
+            'Classify these recommendation candidates.',
+            'Return one enrichment for every candidate_index.',
+            '',
+            JSON.stringify(indexedBatch, null, 2),
+          ].join('\n'),
+          system: buildRecommendationEnrichmentPrompt(taxonomySlugs),
+          schema: RecommendationEnrichmentsSchema,
+          key: `${fixtureKey}:enrichment-${batchNumber - 1}`,
+        });
+        enrichments.push(...result.value.enrichments);
+      }
+
+      return mergeCandidateEnrichments(candidates, enrichments);
+    };
+
+    const runPageAwareExtraction = async (): Promise<RecommendationInput[]> => {
+      const candidates = await runCandidateExtraction();
+      if (candidates.length === 0) return [];
+      await ctx.emit(sourceId, {
+        type: 'progress',
+        percent: 65,
+        message: `found ${candidates.length} recommendation candidate(s); classifying`,
+      });
+      return runCandidateEnrichment(candidates);
+    };
+
+    let metadata: SourceMetadataOutput;
+    let recs: RecommendationInput[];
+    let extractionSummary: string;
+
+    if (usePageWindows) {
+      if (ctx.env.APP_MODE === 'local') {
+        await ctx.emit(sourceId, {
+          type: 'progress',
+          percent: 25,
+          message: 'extracting source metadata',
+        });
+        const pass1Result = await runPass1();
+        metadata = pass1Result.value;
+        await ctx.emit(sourceId, {
+          type: 'progress',
+          percent: 45,
+          message: `scanning ${windows.length} page window(s) for recommendations`,
+        });
+        recs = await runPageAwareExtraction();
+      } else {
+        const [pass1Result, pageRecommendations] = await Promise.all([
+          runPass1(),
+          runPageAwareExtraction(),
+        ]);
+        metadata = pass1Result.value;
+        recs = pageRecommendations;
+      }
+      extractionSummary = `from ${windows.length} page window(s), then classified separately`;
+    } else {
+      let pass1Result: Awaited<ReturnType<typeof runPass1>>;
+      let pass2Result: Awaited<ReturnType<typeof runLegacyPass2>>;
+
+      if (ctx.env.APP_MODE === 'local') {
+        await ctx.emit(sourceId, {
+          type: 'progress',
+          percent: 25,
+          message: 'extracting source metadata',
+        });
+        pass1Result = await runPass1();
+        await ctx.emit(sourceId, {
+          type: 'progress',
+          percent: 45,
+          message: 'extracting recommendations',
+        });
+        pass2Result = await runLegacyPass2();
+      } else {
+        [pass1Result, pass2Result] = await Promise.all([runPass1(), runLegacyPass2()]);
+      }
+
+      metadata = pass1Result.value;
+      recs = pass2Result.value.recommendations;
+      extractionSummary =
+        section.mode === 'sections' ? 'from detected sections' : 'from legacy full-document input';
+    }
+
+    // ----- Source metadata -------------------------------------------------
     await ctx.db
       .update(sources)
       .set({
@@ -206,8 +370,6 @@ export async function extractHandler(
       })
       .where(eq(sources.id, sourceId));
 
-    // Each axis is independent: resolve-or-create slugs, then replace M2M.
-    // Running all 5 in parallel cuts 5 sequential round-trips to 1.
     await Promise.all([
       resolveOrCreateThematicAreas(repoCtx, metadata.thematic_area_slugs).then((ids) =>
         replaceSourceThematicAreas(repoCtx, sourceId, ids),
@@ -226,9 +388,7 @@ export async function extractHandler(
       ),
     ]);
 
-    // ----- Recommendations (from Pass 2) ------------------------------------
-    // Batch-resolve all 5 taxonomy axes upfront (N+1 -> 1 DB call per axis).
-    // Priority timescale is single-valued per rec but still batched across recs.
+    // ----- Recommendations -------------------------------------------------
     const [themeIdsPerRec, purposeIdsPerRec, audienceIdsPerRec, locationIdsPerRec, priorityIdsPerRec] =
       await Promise.all([
         batchResolveTaxonomy(
@@ -251,8 +411,6 @@ export async function extractHandler(
           recs.map((r) => r.location_scope_slugs),
           resolveOrCreateLocationScopes,
         ),
-        // Priority timescale: single slug per rec, but we batch all unique
-        // slugs across recs into one resolveOrCreatePriorityTimescales call.
         recs.length > 0
           ? (async () => {
               const uniqueSlugs = Array.from(
@@ -273,9 +431,6 @@ export async function extractHandler(
           : Promise.resolve([] as (string | null)[]),
       ]);
 
-    // Single transaction: delete old recs → bulk insert new recs → bulk insert
-    // statuses → bulk insert all M2M rows. If any step fails the transaction
-    // rolls back and no partial state remains.
     await ctx.db.transaction(async (tx) => {
       // Idempotency: delete existing recs for this source. Cascades clear
       // recommendation_statuses + every rec-side M2M row automatically.
@@ -283,7 +438,6 @@ export async function extractHandler(
 
       if (recs.length === 0) return;
 
-      // Bulk insert all recommendations, returning IDs for M2M linking.
       const insertedRecs = await tx
         .insert(recommendations)
         .values(
@@ -315,7 +469,6 @@ export async function extractHandler(
         );
       }
 
-      // Bulk insert initial 'open' status for every rec.
       await tx.insert(recommendationStatuses).values(
         insertedRecs.map((r) => ({
           recommendationId: r.id,
@@ -324,8 +477,6 @@ export async function extractHandler(
         })),
       );
 
-      // Bulk insert M2M rows per axis. Since CASCADE on delete cleared all
-      // existing M2M rows, we just insert fresh — no diff needed.
       const themeRows: Array<{ recommendationId: string; thematicAreaId: string }> = [];
       const purposeRows: Array<{ recommendationId: string; purposeId: string }> = [];
       const audienceRows: Array<{ recommendationId: string; targetAudienceTypeId: string }> = [];
@@ -347,17 +498,22 @@ export async function extractHandler(
         }
       }
 
-      // Insert all M2M rows in parallel (one INSERT per axis).
       await Promise.all([
-        themeRows.length > 0 ? tx.insert(recommendationsThematicAreas).values(themeRows) : Promise.resolve(),
-        purposeRows.length > 0 ? tx.insert(recommendationsPurposes).values(purposeRows) : Promise.resolve(),
-        audienceRows.length > 0 ? tx.insert(recommendationsTargetAudienceTypes).values(audienceRows) : Promise.resolve(),
-        locationRows.length > 0 ? tx.insert(recommendationsLocationScopes).values(locationRows) : Promise.resolve(),
+        themeRows.length > 0
+          ? tx.insert(recommendationsThematicAreas).values(themeRows)
+          : Promise.resolve(),
+        purposeRows.length > 0
+          ? tx.insert(recommendationsPurposes).values(purposeRows)
+          : Promise.resolve(),
+        audienceRows.length > 0
+          ? tx.insert(recommendationsTargetAudienceTypes).values(audienceRows)
+          : Promise.resolve(),
+        locationRows.length > 0
+          ? tx.insert(recommendationsLocationScopes).values(locationRows)
+          : Promise.resolve(),
       ]);
     });
 
-    // Final phase update — source advances to `embedding` (the next pipeline
-    // stage). The actual `source.embed` enqueue lives in the queue wiring.
     await ctx.db
       .update(sources)
       .set({ status: 'embedding', updatedAt: new Date() })
@@ -367,7 +523,7 @@ export async function extractHandler(
     await ctx.emit(sourceId, {
       type: 'progress',
       percent: 80,
-      message: `extracted ${recs.length} recommendation(s); ${section.mode === 'sections' ? 'from sections' : 'from full document'}`,
+      message: `extracted ${recs.length} recommendation(s) ${extractionSummary}`,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

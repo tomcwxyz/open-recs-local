@@ -7,8 +7,8 @@ import { sourceFiles, sourcePages, sources } from '@/lib/db/schema';
  * `source.parse` handler.
  *
  * Pipeline step 1: pull the uploaded file from storage, run it through the
- * configured OCR provider, persist canonical markdown + per-page rows, then
- * enqueue `source.extract` for the next stage.
+ * configured document parser, persist canonical markdown + per-page rows,
+ * then enqueue `source.extract` for the next stage.
  *
  * Event channel convention
  * ------------------------
@@ -69,12 +69,17 @@ export async function parseHandler(
     }
 
     const bytes = await ctx.providers.storage.get(fileRow.storageKey);
-    // Fake OCR resolves fixtures by `<filename-stem>.canonical.md`; real
+    // Fake parser resolves fixtures by `<filename-stem>.canonical.md`; real
     // adapters only care about the raw bytes. The filename is the last
     // segment of the storage key we generated at upload time.
     const filename = fileRow.storageKey.split('/').pop() ?? fileRow.storageKey;
 
-    const parsed = await ctx.providers.ocr.parseDocument({ filename, bytes });
+    // `ocr` is retained as a compatibility alias while config/admin surfaces
+    // still use OCR_PROVIDER. New provider factories expose the same instance
+    // as `parser`, which better describes text-layer and layout parsers that
+    // may perform no OCR at all.
+    const parser = ctx.providers.parser ?? ctx.providers.ocr;
+    const parsed = await parser.parseDocument({ filename, bytes });
 
     // Page inserts + sources update land together. If any page insert fails
     // we don't want a half-parsed source left around — the transaction
