@@ -2,7 +2,7 @@ import type { Env } from '../env';
 import type { AuthProvider } from './auth/types';
 import type { LlmProvider } from './llm/types';
 import type { EmbeddingProvider } from './embedding/types';
-import type { OcrProvider } from './ocr/types';
+import type { DocumentParser, OcrProvider } from './ocr/types';
 import type { StorageProvider } from './storage/types';
 import type { EmailProvider } from './email/types';
 import { localAuth } from './auth/local';
@@ -26,6 +26,9 @@ export type Providers = {
   auth: AuthProvider;
   llm: LlmProvider;
   embedding: EmbeddingProvider;
+  /** Preferred name for new ingest code. */
+  parser?: DocumentParser;
+  /** @deprecated Compatibility alias while config/admin still say OCR_PROVIDER. */
   ocr: OcrProvider;
   storage: StorageProvider;
   email: EmailProvider;
@@ -171,11 +174,13 @@ function selectEmail(env: Env): EmailProvider {
 }
 
 export function createProviders(env: Env): Providers {
+  const parser = selectOcr(env);
   return {
     auth: selectAuth(env),
     llm: selectLlm(env),
     embedding: selectEmbedding(env),
-    ocr: selectOcr(env),
+    parser,
+    ocr: parser,
     storage: selectStorage(env),
     email: selectEmail(env),
   };
