@@ -1,77 +1,77 @@
 # Running locally
 
-This guide walks you from a fresh clone to a working dashboard in three environments:
+This guide covers the supported local topologies and, importantly, keeps native and container networking separate.
 
-- **[Mac mini (native)](#mac-mini-native-ollama--docling-sidecar)** — Ollama on the host, Docling in a container, the rest in `docker compose`. Best for everyday development and demos.
-- **[Linux (Docker)](#linux-docker-compose-with-optional-gpu)** — single `docker compose up`, everything in containers. Optional GPU passthrough for Ollama.
-- **[Hosted mode](#hosted-mode-multi-user-deployment)** — multi-user instance with Better-auth, real email, an admin user.
+For the ingest reliability roadmap see [`docs/plans/2026-09-13-local-ingest-reliability-roadmap.md`](plans/2026-09-13-local-ingest-reliability-roadmap.md).
 
-Every path shares the same code. The mode flip is one env var.
+## What is being optimised for
+
+The primary local target is a 16 GB Apple Silicon Mac mini. The app should remain usable without cloud dependencies, but local inference has different constraints from a hosted API: peak memory, model queueing and long-context generation matter more than shaving a few seconds off concurrent requests.
+
+The current production pipeline is still:
+
+```text
+upload -> parse -> extract -> embed -> ready
+```
+
+The September 2026 roadmap is moving parsing towards a text-layer-first, OCR-when-needed approach. Until that lands, Docling remains the main real local parser. Note that the current Docling adapter deliberately disables Docling image OCR and table-structure extraction because both caused worker-pool instability on real mixed-layout/long PDFs. It is therefore best thought of as a PDF text/layout parser in the current release, not a guaranteed scanned-PDF OCR path.
 
 ---
 
-## Prerequisites (all paths)
+## Prerequisites
 
-- **Docker Desktop** (Mac / Windows) or Docker Engine 24+ (Linux).
-- **Node 20.x** and **pnpm 10.x** (via `corepack enable && corepack prepare pnpm@10 --activate`).
-- ~6 GB of free disk for the Postgres + pgvector image, the Docling sidecar (if used), and Ollama models.
+- Docker Desktop on macOS/Windows, or Docker Engine 24+ on Linux.
+- Node 20+ and pnpm 10.x.
+- Ollama for local LLM/embedding inference.
+- Enough disk for Postgres, optional Docling and local models.
 
-Clone the repo and install:
+Clone and install:
 
 ```bash
-git clone https://github.com/dataforaction-tom/open-recs-local.git
+git clone https://github.com/tomcwxyz/open-recs-local.git
 cd open-recs-local
 pnpm install
 cp .env.example .env
 ```
 
-The default `.env` boots in local mode with **fake providers** — every cross-cutting service has a working stub that returns canned data. That's enough to click through every UI surface but won't extract real recommendations from real PDFs.
+The default provider selection uses fake AI/OCR providers, which is useful for UI and queue development but does not test real document extraction.
 
 ---
 
-## Quickest path: fake providers only
+# Topology A — native app + worker, Docker Postgres
+
+This is the recommended development setup on a Mac mini. Next.js and the worker run directly on macOS, Ollama runs directly on macOS, and only Postgres (plus optional Docling) uses Docker.
+
+## 1. Start Postgres
 
 ```bash
 docker compose up -d postgres
 pnpm db:migrate
 pnpm db:seed
-pnpm dev
 ```
 
-Visit <http://localhost:3000>. You can:
+The bundled Postgres maps to host port `5434`, so the native connection string is:
 
-- Upload a PDF on `/sources` — the fake OCR returns canned markdown.
-- Watch the pipeline progress on the dashboard.
-- Browse recommendations on `/recommendations`.
-- Post progress updates and toggle status.
-- View analytics on `/analytics`.
+```env
+DATABASE_URL=postgres://postgres:postgres@localhost:5434/openrecs
+```
 
-Use this path when you're working on UI / repo / job code and don't need real extraction quality.
-
----
-
-## Mac mini (native Ollama + Docling sidecar)
-
-This is the recommended path for evaluating real extraction quality on a Mac without paying for cloud LLMs.
-
-### 1. Ollama on the host
+## 2. Start Ollama
 
 ```bash
 brew install ollama
-ollama serve              # in one terminal
-ollama pull llama3.1:8b   # in another terminal
-ollama pull nomic-embed-text
-ollama pull qwen2.5:0.5b  # lightweight chat-search model
+ollama serve
 ```
 
-Ollama listens on `http://localhost:11434`.
+In another terminal, install models. The historical default is Llama 3.1 8B for extraction and `nomic-embed-text` for embeddings:
 
-#### Create the extract model
+```bash
+ollama pull llama3.1:8b
+ollama pull nomic-embed-text
+ollama pull qwen2.5:0.5b
+```
 
-The two-pass extraction pipeline sends long documents to the LLM, so create a
-derived model with a larger context window than the stock `llama3.1:8b`
-(default 4096 tokens). `num_ctx 12288` comfortably fits a typical inquiry
-report chapter in a single request:
+The current extractor can require more than the stock 4k context. If you use Llama 3.1, create the existing 12k profile:
 
 ```bash
 ollama create llama3.1-extract -f - <<'EOF'
@@ -80,169 +80,249 @@ PARAMETER num_ctx 12288
 EOF
 ```
 
-You'll reference this derived model as `LLM_MODEL=llama3.1-extract` below.
-
-### 2. Docling in a container
-
-Docling does OCR + table extraction for PDFs. Run it via the bundled compose override:
+For a 16 GB machine, prefer a single heavyweight generation at a time. A useful Ollama launch profile is:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.docling.yml up -d
+OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 ollama serve
 ```
 
-That brings up Postgres + the Docling sidecar.
+Model defaults are being re-benchmarked as part of the local-ingest roadmap; do not treat Llama 3.1 8B as a permanent architectural dependency.
 
-### 3. Point the app at both
+## 3. Configure native providers
 
-Edit `.env`:
+Use localhost addresses because the app and worker are running on the host:
+
+```env
+APP_MODE=local
+DATABASE_URL=postgres://postgres:postgres@localhost:5434/openrecs
+
+LLM_PROVIDER=openai-compatible
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=llama3.1-extract
+LLM_TIMEOUT_MS=180000
+
+CHAT_PROVIDER=openai-compatible
+CHAT_BASE_URL=http://localhost:11434/v1
+CHAT_MODEL=qwen2.5:0.5b
+
+EMBEDDING_PROVIDER=openai-compatible
+EMBEDDING_BASE_URL=http://localhost:11434/v1
+EMBEDDING_MODEL=nomic-embed-text
+
+STORAGE_PROVIDER=fs
+STORAGE_FS_PATH=./.data/uploads
+```
+
+## 4. Optional Docling sidecar
+
+Start Docling only, without starting a second copy of the app/worker:
 
 ```bash
+docker compose -f docker-compose.yml -f docker-compose.docling.yml up -d postgres docling
+```
+
+Then configure the native worker to reach its published host port:
+
+```env
+OCR_PROVIDER=docling
+DOCLING_BASE_URL=http://localhost:5001
+```
+
+Current behaviour: `do_ocr=false` and `do_table_structure=false` are sent by the adapter for reliability. Born-digital PDFs with a usable text layer work best. The adaptive Tesseract/OCRmyPDF fallback described in the roadmap is not implemented yet.
+
+Without Docling, leave `OCR_PROVIDER=fake` only for deterministic development/tests; real PDF ingest requires a real parsing provider.
+
+## 5. Run app and worker
+
+Use two terminals:
+
+```bash
+pnpm dev
+```
+
+```bash
+pnpm worker:dev
+```
+
+Both processes resolve `./.data/uploads` from the same repository working directory, so filesystem storage is shared.
+
+---
+
+# Topology B — containerised app + worker + Postgres
+
+Use this when you want the runtime to match Docker deployment more closely.
+
+```bash
+docker compose up -d --build
+```
+
+`docker-compose.yml` deliberately overrides two host-oriented settings inside app/worker containers:
+
+```text
+DATABASE_URL     -> postgresql://postgres:postgres@postgres:5432/openrecs
+STORAGE_FS_PATH  -> /data/uploads
+```
+
+Both app and worker mount the same `uploads` named volume at `/data/uploads`. Do not replace that with `./.data/uploads` inside the containers: relative paths would resolve independently in each container and the worker would not see files written by the app.
+
+When Ollama is running on the Mac host, containerised services should use Docker Desktop's host bridge:
+
+```env
 LLM_PROVIDER=openai-compatible
 LLM_BASE_URL=http://host.docker.internal:11434/v1
 LLM_MODEL=llama3.1-extract
 
-# Optional: lighter model for the streaming chat-search path.
+CHAT_PROVIDER=openai-compatible
+CHAT_BASE_URL=http://host.docker.internal:11434/v1
 CHAT_MODEL=qwen2.5:0.5b
 
 EMBEDDING_PROVIDER=openai-compatible
 EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
 EMBEDDING_MODEL=nomic-embed-text
+```
 
+To add the Docling sidecar:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.docling.yml up -d --build
+```
+
+The override sets:
+
+```text
 OCR_PROVIDER=docling
 DOCLING_BASE_URL=http://docling:5001
 ```
 
-(`host.docker.internal` is Docker Desktop's bridge to the host network; substitute `localhost` if you run the app outside compose.)
+Do **not** also run `pnpm dev` on port 3000 unless you intentionally want a second app process.
 
-### 4. Migrate and run
+---
+
+# Fake-provider development
+
+For UI, repository and queue work where real extraction quality is irrelevant:
+
+```env
+LLM_PROVIDER=fake
+EMBEDDING_PROVIDER=fake
+OCR_PROVIDER=fake
+STORAGE_PROVIDER=fs
+STORAGE_FS_PATH=./.data/uploads
+```
+
+Then:
 
 ```bash
+docker compose up -d postgres
 pnpm db:migrate
 pnpm db:seed
+pnpm worker:dev
 pnpm dev
 ```
 
-Upload a real PDF on `/sources`; Docling extracts text + tables + page images, the LLM splits the document into recommendations, the embedding model populates the vector columns. Watch progress events stream on the dashboard.
+The fixture-backed pipeline is deterministic. It proves queue/persistence/UI wiring; it does **not** prove Docling/Ollama work on real reports.
 
 ---
 
-## Linux (Docker compose, with optional GPU)
+# Provider checks
 
-Everything in containers:
+The admin provider settings surface can run lightweight connection probes. Interpret them correctly:
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.docling.yml up -d
-```
+- LLM probe proves the model endpoint can answer a tiny generation request;
+- embedding probe reports the returned vector dimension;
+- Docling probe checks `/health` only.
 
-For Ollama with NVIDIA GPU, create `docker-compose.ollama.yml`:
-
-```yaml
-services:
-  ollama:
-    image: ollama/ollama:latest
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-volumes:
-  ollama-data:
-```
-
-Then bring everything up:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.docling.yml -f docker-compose.ollama.yml up -d
-docker compose exec ollama ollama pull llama3.1:8b
-docker compose exec ollama ollama pull nomic-embed-text
-```
-
-`.env` is the same as the Mac path but use the service hostnames:
-
-```bash
-LLM_BASE_URL=http://ollama:11434/v1
-EMBEDDING_BASE_URL=http://ollama:11434/v1
-```
+Those probes are not substitutes for a real PDF -> parser -> structured extraction -> embedding smoke test. A real-provider smoke profile is part of the reliability roadmap.
 
 ---
 
-## Hosted mode (multi-user deployment)
+# Troubleshooting the ingest pipeline
 
-For a real multi-user instance — Better-auth, ownership requests, admin dashboard.
+## Upload succeeds but parse immediately fails with `fs storage: key not found`
 
-### Required env
+Check whether app and worker share the same storage path.
 
-```bash
-APP_MODE=hosted
+Native processes should both use:
 
-# 32+ random chars. Generate with `openssl rand -hex 32`.
-BETTER_AUTH_SECRET=<random 32+ chars>
-BETTER_AUTH_URL=https://your.app.example
-FILE_TOKEN_SECRET=<random 32+ chars>
-
-# Email for password reset + magic link.
-EMAIL_PROVIDER=resend
-RESEND_API_KEY=re_…
-RESEND_FROM=noreply@your.domain
+```env
+STORAGE_FS_PATH=./.data/uploads
 ```
 
-Without `EMAIL_PROVIDER=resend`, reset and magic-link URLs go to stdout (the `console` fake) — useful for an evaluation deploy, not for a real one.
+Containerised app/worker should both show:
 
-### First admin
-
-The first user to sign up at `/signup` is promoted to `admin` automatically. Subsequent signups are `viewer`. The bootstrap fires once when `user_roles` is empty — protect access until you've created the first admin.
-
-### Smoke-test
-
-```bash
-pnpm db:migrate
-pnpm db:seed
-docker compose up -d
+```text
+STORAGE_FS_PATH=/data/uploads
 ```
 
-Then visit your deployed URL, sign up, upload a private PDF, sign out, sign in as a second user, request access to that PDF, sign back in as admin, approve from `/admin`, sign in as the second user again — they can now see the source.
+The compose file now enforces the container path.
+
+## Upload row appears but live progress looks stuck
+
+Pipeline events are keyed by `sourceId`, because parse/extract/embed are separate pg-boss jobs. The UI should subscribe to `/api/jobs/{sourceId}/stream`. Older builds incorrectly subscribed using only the first queue job id.
+
+## Source fails during parsing
+
+Inspect worker logs first. Current Docling failure classes include:
+
+- service unreachable;
+- worker-pool crash / truncated response;
+- unsupported/malformed PDF;
+- page-range conversion failure.
+
+The current adapter chunks long PDFs at 50 pages and disables OCR/table structure because those settings were observed to improve stability. If the PDF is scanned with no useful text layer, the present Docling profile may not be sufficient.
+
+## Source fails during extraction
+
+Check:
+
+- the configured model exists in Ollama;
+- the worker can reach `LLM_BASE_URL`;
+- context is sufficient for the current extraction prompt;
+- timeout is long enough for local inference;
+- Ollama is not trying to service multiple heavyweight requests concurrently.
+
+The September reliability work is changing local mode to favour sequential extraction and then replacing long full-document prompts with small page-aware windows.
+
+## Source fails during embedding
+
+The database schema currently expects 768-dimensional vectors. `nomic-embed-text` is the tested local option. The adapter also truncates page text before embedding to avoid local model context overflows on dense markdown tables.
 
 ---
 
-## Verifying after every code change
+# Verification
+
+After code changes:
 
 ```bash
 pnpm verify
 ```
 
-Runs typecheck + lint + Vitest + the Next.js production build. Pre-commit hook on the project also runs this slice when relevant.
+For deterministic local browser coverage:
 
-For anything touching the schema or the job pipeline, the Testcontainers-backed integration tests will start a fresh Postgres per file — first run is slow as the image pulls.
+```bash
+pnpm test:e2e:local
+```
 
----
-
-## Troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| `error during connect … docker_engine` | Docker Desktop isn't started. Launch it and retry. |
-| `Cannot find module` after pulling | `pnpm install` (lockfile changed). |
-| Reset email never arrives in hosted mode | `EMAIL_PROVIDER=console` (the default). Set `EMAIL_PROVIDER=resend` + the two `RESEND_*` vars. |
-| Embedding column type mismatch | The schema's vector dimension (default 768) must match what the embedding model emits. Re-embed if you swap models. |
-| Search returns empty | Confirm `pnpm db:seed` ran (the taxonomy rows are required by some queries) and that the upload pipeline reached `status=ready` on the dashboard. |
+Remember that the standard local E2E uses fake parser/LLM/embedding providers for the ingest portion. Real-provider smoke tests are intentionally being added as a separate profile so failures in external local runtimes are visible rather than hidden behind fixtures.
 
 ---
 
-## Extraction quality — local vs. hosted models
+# Hosted mode
 
-The two-pass extraction pipeline shipped in 1.1 asks the LLM to (a) summarise the document and tag it on five axes, and (b) extract every recommendation with full multi-axis tagging + confidence. A small local model like `llama3.1:8b` can complete both passes, but accuracy drops noticeably on long documents and the LLM may coin new tags rather than picking from the listed taxonomy.
+Hosted mode uses the same schema and pipeline but adds Better Auth, provider configuration, ownership/access controls and email delivery.
 
-The recommended split:
+Minimum hosted configuration includes:
 
-- **Local mode**: `LLM_PROVIDER=openai-compatible`, `LLM_MODEL=llama3.1:8b` (or your installed Ollama model). Free, runs on the Mac mini.
-- **Hosted mode**: `LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-haiku-4-5`. Cents per document; meaningfully better recall + accuracy on the structured-output paths.
+```env
+APP_MODE=hosted
+BETTER_AUTH_SECRET=<32+ random chars>
+BETTER_AUTH_URL=https://your.app.example
+FILE_TOKEN_SECRET=<32+ random chars>
+PROVIDER_SECRET_KEY=<32+ random chars>
 
-The `CHAT_*` env split shipped in 1.0 lets you run a heavyweight extract model alongside a lightweight streaming chat model — useful if you want Claude for extract and `qwen2.5:0.5b` (local) for chat.
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=re_...
+RESEND_FROM=noreply@your.domain
+```
 
-Unknown tags coined by the extract LLM land as `unverified=true` in the taxonomy and surface on `/admin/tags` for promotion / rename / merge / delete. Admin operators should sweep that queue periodically.
+The local-ingest roadmap does not change the one-codebase principle. Parser, model and storage choices remain provider concerns rather than separate application forks.
