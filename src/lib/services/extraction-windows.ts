@@ -154,9 +154,8 @@ export function applyWindowProvenance(
 ): RecommendationInput {
   let start = recommendation.page_start ?? null;
   let end = recommendation.page_end ?? null;
-
-  const inWindow = (page: number): boolean =>
-    page >= window.startPage && page <= window.endPage;
+  const windowPages = new Set(window.pageNumbers);
+  const inWindow = (page: number): boolean => windowPages.has(page);
 
   if (start !== null && !inWindow(start)) start = null;
   if (end !== null && !inWindow(end)) end = null;
