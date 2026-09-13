@@ -23,9 +23,12 @@ export type TesseractPdfConfig = {
   runCommand?: CommandRunner;
   /** Overall timeout for each external command. */
   timeoutMs?: number;
+  /** OCRmyPDF/Tesseract worker count. Defaults to 1 for predictable local RAM/CPU use. */
+  jobs?: number;
 };
 
 const DEFAULT_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_OCR_JOBS = 1;
 const MAX_COMMAND_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 function defaultRunCommand(
@@ -95,6 +98,10 @@ function canonicalMarkdown(pages: ParsedPage[]): string {
   return pages.map((page) => page.markdown).join('\n\n---\n\n');
 }
 
+function ocrPageSelection(pageNumbers: number[]): string {
+  return pageNumbers.join(',');
+}
+
 async function extractPdfText(
   runCommand: CommandRunner,
   pdfPath: string,
@@ -113,9 +120,10 @@ async function extractPdfText(
  *
  * 1. Try the embedded text layer with Poppler (`pdftotext`).
  * 2. If every page has usable text, return immediately — no OCR/model cost.
- * 3. If one or more pages are sparse, run OCRmyPDF with `--skip-text` so
- *    existing text pages are preserved and only pages without text are OCRed
- *    by Tesseract.
+ * 3. If one or more pages are sparse, run OCRmyPDF only for those page numbers.
+ *    We use `--force-ocr` on the selected pages so a stray page number,
+ *    watermark or broken partial text layer cannot prevent OCR. Unselected
+ *    pages are preserved, and PDF optimisation/PDF-A conversion are disabled.
  * 4. Extract page-aware text from the repaired/OCRed PDF with Poppler.
  *
  * This intentionally favours predictable page provenance and low peak memory
@@ -125,6 +133,7 @@ async function extractPdfText(
 export function createTesseractPdfOcr(config: TesseractPdfConfig = {}): OcrProvider {
   const runCommand = config.runCommand ?? defaultRunCommand;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const jobs = Math.max(1, Math.floor(config.jobs ?? DEFAULT_OCR_JOBS));
 
   return {
     name: 'tesseract-pdf',
@@ -145,9 +154,8 @@ export function createTesseractPdfOcr(config: TesseractPdfConfig = {}): OcrProvi
           .filter((page) => !hasUsableText(page))
           .map((page) => page.pageNumber);
         const hasAnyUsablePage = textLayerPages.some(hasUsableText);
-        const needsOcr = textLayerPages.length === 0 || sparsePageNumbers.length > 0;
 
-        if (!needsOcr) {
+        if (sparsePageNumbers.length === 0) {
           return {
             markdown: canonicalMarkdown(textLayerPages),
             pages: textLayerPages,
@@ -164,11 +172,15 @@ export function createTesseractPdfOcr(config: TesseractPdfConfig = {}): OcrProvi
         await runCommand(
           'ocrmypdf',
           [
-            '--skip-text',
+            '--pages',
+            ocrPageSelection(sparsePageNumbers),
+            '--force-ocr',
             '--output-type',
             'pdf',
             '--optimize',
             '0',
+            '--jobs',
+            String(jobs),
             '--quiet',
             inputPath,
             outputPath,
@@ -177,6 +189,9 @@ export function createTesseractPdfOcr(config: TesseractPdfConfig = {}): OcrProvi
         );
 
         const ocrPages = await extractPdfText(runCommand, outputPath, timeoutMs);
+        const remainingSparsePageNumbers = ocrPages
+          .filter((page) => sparsePageNumbers.includes(page.pageNumber) && !hasUsableText(page))
+          .map((page) => page.pageNumber);
         const hasTextAfterOcr = ocrPages.some((page) => page.markdown.trim().length > 0);
         if (!hasTextAfterOcr) {
           throw new Error('tesseract-pdf produced no extractable text after OCR');
@@ -191,7 +206,9 @@ export function createTesseractPdfOcr(config: TesseractPdfConfig = {}): OcrProvi
             ocrFallbackUsed: true,
             pageCount: ocrPages.length,
             sparsePageNumbers,
+            remainingSparsePageNumbers,
             textLayerHadUsablePages: hasAnyUsablePage,
+            ocrJobs: jobs,
           },
         };
       } finally {
