@@ -60,6 +60,11 @@ const MAX_PASS1_MARKDOWN = 10_000;
 // context window and lets a single Pass 2 call finish in roughly a
 // minute. Sources with explicit rec sections usually return far less
 // than this from `detectRecommendationSections` anyway.
+//
+// This head-truncation fallback is still a known recall problem for long
+// reports whose recommendations appear late in the document. The local-ingest
+// roadmap replaces it with page-aware extraction windows; keep the current cap
+// until that work lands so this reliability change stays behaviourally small.
 const MAX_PASS2_MARKDOWN = 30_000;
 
 function fixtureKeyFromStorageKey(storageKey: string): string {
@@ -91,6 +96,12 @@ function parsePublicationDate(input: string | null): Date | null {
  * found, sends just those sections with a strict prompt; otherwise sends
  * the (truncated) full document with a looser prompt. Persists every rec
  * with its multi-axis tags + priority_timescale FK + confidence.
+ *
+ * Local concurrency: cloud APIs benefit from running the two independent
+ * passes concurrently, but a 16 GB local inference host does not. In local
+ * mode we deliberately run Pass 1 then Pass 2 so Ollama does not have to
+ * queue/parallelise two long-context structured generations whose deadlines
+ * are already ticking. Hosted mode retains the parallel path.
  *
  * Idempotency: pg-boss retries trigger a full re-run. Both passes are
  * idempotent — Pass 1 UPDATEs source columns and calls `replaceSource*`
@@ -165,9 +176,6 @@ export async function extractHandler(
       priority_timescale: priorityTimescaleRows.map((r) => r.slug),
     };
 
-    // ----- Pass 1 + Pass 2: Run in parallel --------------------------------
-    // Both LLM calls are independent, so run concurrently for ~2x speedup.
-    // If either fails, we propagate the error (both must succeed for valid output).
     const pass1Input = truncate(canonicalMarkdown, MAX_PASS1_MARKDOWN);
     const section = detectRecommendationSections(canonicalMarkdown);
     const pass2Input = truncate(section.processText, MAX_PASS2_MARKDOWN);
@@ -176,20 +184,40 @@ export async function extractHandler(
         ? buildPass2StrictPrompt(taxonomySlugs)
         : buildPass2LooserPrompt(taxonomySlugs);
 
-    const [pass1Result, pass2Result] = await Promise.all([
+    const runPass1 = () =>
       ctx.providers.llm.generateStructured({
         prompt: `Extract the source-level metadata for the following document.\n\n---\n${pass1Input}`,
         system: buildPass1Prompt(taxonomySlugs),
         schema: SourceMetadataSchema,
         key: `${fixtureKey}:metadata`,
-      }),
+      });
+    const runPass2 = () =>
       ctx.providers.llm.generateStructured({
         prompt: `Extract every actionable recommendation from the text below.\n\n---\n${pass2Input}`,
         system: pass2System,
         schema: RecommendationsSchema,
         key: fixtureKey,
-      }),
-    ]);
+      });
+
+    let pass1Result: Awaited<ReturnType<typeof runPass1>>;
+    let pass2Result: Awaited<ReturnType<typeof runPass2>>;
+
+    if (ctx.env.APP_MODE === 'local') {
+      await ctx.emit(sourceId, {
+        type: 'progress',
+        percent: 25,
+        message: 'extracting source metadata',
+      });
+      pass1Result = await runPass1();
+      await ctx.emit(sourceId, {
+        type: 'progress',
+        percent: 45,
+        message: 'extracting recommendations',
+      });
+      pass2Result = await runPass2();
+    } else {
+      [pass1Result, pass2Result] = await Promise.all([runPass1(), runPass2()]);
+    }
 
     const metadata: SourceMetadataOutput = pass1Result.value;
     const recs: RecommendationInput[] = pass2Result.value.recommendations;
