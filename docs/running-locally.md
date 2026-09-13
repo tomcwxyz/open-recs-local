@@ -16,16 +16,19 @@ upload -> parse -> find recommendation candidates -> enrich -> embed -> ready
 
 For newly parsed real PDFs the extraction stage is page-aware. Recommendation detection uses bounded overlapping page windows with explicit `[PAGE N]` markers, deduplicates candidates, then classifies/tag them separately. This avoids the previous first-30k-character fallback and keeps the taxonomy schema out of the most recall-sensitive model calls.
 
-For native local PDF parsing, the recommended baseline is now **text layer first, OCR when needed**:
+For native local PDF parsing, the recommended baseline is now **text layer first, OCR only where needed**:
 
 ```text
 PDF
   -> pdftotext (Poppler), page by page
-  -> if every page has useful text: continue immediately
-  -> if pages are sparse/scanned: OCRmyPDF --skip-text (Tesseract)
+  -> score each page's usable text
+  -> if every page is useful: continue immediately
+  -> if pages are sparse/scanned: OCRmyPDF --pages <those pages> --force-ocr
   -> pdftotext again
   -> page-aware extraction
 ```
+
+The page selection matters. OCRmyPDF's skip-text mode deliberately leaves pages containing existing printable text alone; that is not enough for a scan with only a page number, watermark or broken partial text layer. Open Recommendations therefore selects only the pages that fail its text-quality gate and force-OCRs those pages, leaving good text pages outside the OCR work order.
 
 Docling remains available as an explicit alternative when its richer layout behaviour is useful. The current Docling adapter still disables Docling image OCR and table-structure extraction because both caused worker-pool instability on real mixed-layout/long PDFs; it should not be treated as the default scanned-PDF OCR path.
 
@@ -85,7 +88,9 @@ ocrmypdf --version
 tesseract --version
 ```
 
-`pdftotext` handles ordinary born-digital PDFs without invoking OCR. If any extracted page is effectively blank/sparse, the provider runs OCRmyPDF with `--skip-text`; pages with existing text are preserved and pages without useful text are OCRed by Tesseract. Temporary input/output PDFs are deleted after each parse, including failure paths.
+`pdftotext` handles ordinary born-digital PDFs without invoking OCR. If one or more extracted pages are blank or too sparse to be useful, the provider calls OCRmyPDF with an explicit `--pages` list and `--force-ocr`. Only those selected pages are OCR targets; `--output-type pdf --optimize 0` avoids whole-file PDF/A conversion and image optimisation, and OCRmyPDF is limited to one job by default for predictable resource use on the 16 GB target. The repaired PDF is then read by Poppler again. Temporary input/output PDFs are deleted after each parse, including failure paths.
+
+Parser metadata records `sparsePageNumbers` and `remainingSparsePageNumbers`, so a page that still has poor text after Tesseract is visible to diagnostics/benchmarks rather than silently counted as successful OCR.
 
 Configure:
 
@@ -331,7 +336,7 @@ ocrmypdf --version
 
 Typical failure classes are a missing command on `PATH`, malformed/encrypted PDF, an OCRmyPDF/Tesseract failure, or a command exceeding the 15-minute per-command deadline. The worker error should identify which command failed.
 
-A born-digital PDF should normally run `pdftotext` only. A mixed/scanned PDF should run `pdftotext`, then OCRmyPDF, then `pdftotext` on the repaired/OCRed output.
+A born-digital PDF should normally run `pdftotext` only. A mixed/scanned PDF should run `pdftotext`, then targeted OCRmyPDF on the sparse page numbers, then `pdftotext` on the repaired/OCRed output. If `remainingSparsePageNumbers` is non-empty afterwards, OCR completed but those pages still did not cross the usable-text threshold; that is a parse-quality problem worth inspecting rather than an automatic pipeline failure.
 
 ## Docling source fails during parsing
 
