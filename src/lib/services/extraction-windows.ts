@@ -1,5 +1,3 @@
-import type { RecommendationInput } from './extraction-schema';
-
 export type ExtractionPage = {
   pageNumber: number;
   markdown: string;
@@ -18,6 +16,13 @@ export type ExtractionWindowOptions = {
   maxChars?: number;
   overlapPages?: number;
   longPageOverlapChars?: number;
+};
+
+type RecommendationWithProvenance = {
+  title: string;
+  body: string;
+  page_start?: number | null;
+  page_end?: number | null;
 };
 
 const DEFAULT_MAX_PAGES = 6;
@@ -148,10 +153,10 @@ function pageMax(...values: Array<number | null | undefined>): number | null {
  * For a single-page window we can safely fill a missing anchor. For wider
  * windows an absent anchor stays absent rather than inventing precision.
  */
-export function applyWindowProvenance(
-  recommendation: RecommendationInput,
+export function applyWindowProvenance<T extends RecommendationWithProvenance>(
+  recommendation: T,
   window: ExtractionWindow,
-): RecommendationInput {
+): T {
   let start = recommendation.page_start ?? null;
   let end = recommendation.page_end ?? null;
   const windowPages = new Set(window.pageNumbers);
@@ -185,10 +190,10 @@ export function applyWindowProvenance(
  * dedupe would incorrectly collapse genuinely distinct recommendations that
  * share a generic heading such as "Increase funding".
  */
-export function dedupeRecommendations(
-  recommendations: RecommendationInput[],
-): RecommendationInput[] {
-  const byContent = new Map<string, RecommendationInput>();
+export function dedupeRecommendations<T extends RecommendationWithProvenance>(
+  recommendations: T[],
+): T[] {
+  const byContent = new Map<string, T>();
 
   for (const recommendation of recommendations) {
     const key = `${normaliseRecommendationText(recommendation.title)}|${normaliseRecommendationText(
