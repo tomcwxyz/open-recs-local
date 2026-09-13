@@ -18,6 +18,7 @@ import { createOpenAICompatEmbedding } from './embedding/openai-compat';
 import { createFakeOcr } from './ocr/fake';
 import { createDoclingOcr } from './ocr/docling';
 import { createMistralOcr } from './ocr/mistral';
+import { createTesseractPdfOcr } from './ocr/tesseract-pdf';
 import { createFakeStorage } from './storage/fake';
 import { createFsStorage } from './storage/fs';
 
@@ -119,6 +120,8 @@ function selectOcr(env: Env): OcrProvider {
         ...(env.MISTRAL_BASE_URL ? { baseUrl: env.MISTRAL_BASE_URL } : {}),
       });
     }
+    case 'tesseract-pdf':
+      return createTesseractPdfOcr();
     default:
       return notWired('ocr', env.OCR_PROVIDER);
   }
