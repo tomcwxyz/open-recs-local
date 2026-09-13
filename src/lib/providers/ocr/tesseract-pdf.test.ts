@@ -39,7 +39,7 @@ describe('tesseract-pdf provider', () => {
     });
   });
 
-  it('runs OCRmyPDF only when one or more pages have a sparse text layer', async () => {
+  it('force-OCRs only pages whose text layer is sparse', async () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     let textCall = 0;
     const runCommand: CommandRunner = vi.fn(async (command, args) => {
@@ -49,14 +49,17 @@ describe('tesseract-pdf provider', () => {
       }
       textCall += 1;
       if (textCall === 1) {
-        return { stdout: `${rich('Digital page.')}\f\f`, stderr: '' };
+        return {
+          stdout: `${rich('Digital page.')}\f17 Annual Report\f${rich('Another digital page.')}\f`,
+          stderr: '',
+        };
       }
       return {
-        stdout: `${rich('Digital page.')}\f${rich('Recovered scan.')}\f`,
+        stdout: `${rich('Digital page.')}\f${rich('Recovered sparse scan.')}\f${rich('Another digital page.')}\f`,
         stderr: '',
       };
     });
-    const provider = createTesseractPdfOcr({ runCommand });
+    const provider = createTesseractPdfOcr({ runCommand, jobs: 1 });
 
     const result = await provider.parseDocument({ filename: 'mixed.pdf', bytes: FAKE_PDF });
 
@@ -66,17 +69,48 @@ describe('tesseract-pdf provider', () => {
       'pdftotext',
     ]);
     const ocrCall = calls[1]!;
-    expect(ocrCall.args).toContain('--skip-text');
+    const pagesFlag = ocrCall.args.indexOf('--pages');
+    expect(pagesFlag).toBeGreaterThanOrEqual(0);
+    expect(ocrCall.args[pagesFlag + 1]).toBe('2');
+    expect(ocrCall.args).toContain('--force-ocr');
+    expect(ocrCall.args).not.toContain('--skip-text');
     expect(ocrCall.args).toContain('--optimize');
-    expect(result.pages).toHaveLength(2);
-    expect(result.pages[1]!.markdown).toContain('Recovered scan');
+    expect(ocrCall.args).toContain('--jobs');
+    expect(result.pages).toHaveLength(3);
+    expect(result.pages[1]!.markdown).toContain('Recovered sparse scan');
     expect(result.metadata).toMatchObject({
       parser: 'pdftotext+ocrmypdf+tesseract',
       ocrFallbackUsed: true,
-      pageCount: 2,
+      pageCount: 3,
       sparsePageNumbers: [2],
+      remainingSparsePageNumbers: [],
       textLayerHadUsablePages: true,
+      ocrJobs: 1,
     });
+  });
+
+  it('passes every sparse page to OCRmyPDF as a page selection', async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    let textCall = 0;
+    const runCommand: CommandRunner = vi.fn(async (command, args) => {
+      calls.push({ command, args });
+      if (command === 'ocrmypdf') return { stdout: '', stderr: '' };
+      textCall += 1;
+      return textCall === 1
+        ? { stdout: `\f${rich('Digital middle page.')}\f3\f`, stderr: '' }
+        : {
+            stdout: `${rich('Recovered page one.')}\f${rich('Digital middle page.')}\f${rich('Recovered page three.')}\f`,
+            stderr: '',
+          };
+    });
+    const provider = createTesseractPdfOcr({ runCommand, jobs: 2 });
+
+    const result = await provider.parseDocument({ filename: 'mixed.pdf', bytes: FAKE_PDF });
+
+    const ocrCall = calls.find((call) => call.command === 'ocrmypdf')!;
+    expect(ocrCall.args[ocrCall.args.indexOf('--pages') + 1]).toBe('1,3');
+    expect(ocrCall.args[ocrCall.args.indexOf('--jobs') + 1]).toBe('2');
+    expect(result.metadata).toMatchObject({ sparsePageNumbers: [1, 3], ocrJobs: 2 });
   });
 
   it('OCRs an effectively textless PDF', async () => {
@@ -96,11 +130,31 @@ describe('tesseract-pdf provider', () => {
     expect(result.metadata).toMatchObject({
       ocrFallbackUsed: true,
       sparsePageNumbers: [1],
+      remainingSparsePageNumbers: [],
       textLayerHadUsablePages: false,
     });
   });
 
-  it('fails loudly when OCR still produces no text', async () => {
+  it('records targeted pages that remain sparse after OCR', async () => {
+    let textCall = 0;
+    const runCommand: CommandRunner = vi.fn(async (command) => {
+      if (command === 'ocrmypdf') return { stdout: '', stderr: '' };
+      textCall += 1;
+      return textCall === 1
+        ? { stdout: `${rich('Good page.')}\f17 Annual Report\f`, stderr: '' }
+        : { stdout: `${rich('Good page.')}\fstill tiny\f`, stderr: '' };
+    });
+    const provider = createTesseractPdfOcr({ runCommand });
+
+    const result = await provider.parseDocument({ filename: 'poor-scan.pdf', bytes: FAKE_PDF });
+
+    expect(result.metadata).toMatchObject({
+      sparsePageNumbers: [2],
+      remainingSparsePageNumbers: [2],
+    });
+  });
+
+  it('fails loudly when OCR still produces no text at all', async () => {
     const runCommand: CommandRunner = vi.fn(async (command) =>
       command === 'ocrmypdf'
         ? { stdout: '', stderr: '' }
