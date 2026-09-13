@@ -14,6 +14,8 @@ export type LlmStructuredInput<T> = {
   prompt: string;
   schema: z.ZodType<T>;
   system?: string;
+  /** Structured extraction should normally use 0 for deterministic JSON. */
+  temperature?: number;
   /** Key used by the fake to look up a canned response. Ignored by real adapters. */
   key?: string;
 };
