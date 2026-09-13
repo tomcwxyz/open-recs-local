@@ -18,6 +18,29 @@ describe('detectRecommendationSections', () => {
     expect(result.processText).not.toContain('Intro text');
   });
 
+  it('detects nested H2/H3 recommendation headings', () => {
+    const md = '# Findings\n\nContext.\n\n## Recommendations\n\nDo X.\n\n### Recommendation 2: Do Y\n\nMore detail.';
+    const result = detectRecommendationSections(md);
+    expect(result.mode).toBe('sections');
+    expect(result.processText).toContain('## Recommendations');
+    expect(result.processText).toContain('### Recommendation 2: Do Y');
+    expect(result.processText).not.toContain('Context.');
+  });
+
+  it('detects "Key recommendations"', () => {
+    const md = '# Findings\n\nText.\n\n## Key recommendations\n\n1. Fund the service.';
+    const result = detectRecommendationSections(md);
+    expect(result.mode).toBe('sections');
+    expect(result.processText).toContain('Key recommendations');
+  });
+
+  it('detects "Recommendations for ..." headings', () => {
+    const md = '# Findings\n\nText.\n\n## Recommendations for government\n\nCreate a national plan.';
+    const result = detectRecommendationSections(md);
+    expect(result.mode).toBe('sections');
+    expect(result.processText).toContain('Recommendations for government');
+  });
+
   it('detects "# Next steps" as a recommendation section', () => {
     const md = '# Background\n\nText.\n\n# Next steps\n\nAct now.';
     const result = detectRecommendationSections(md);
@@ -32,11 +55,13 @@ describe('detectRecommendationSections', () => {
     expect(result.processText).toContain('Conclusions and recommendations');
   });
 
-  it('detects "# Actions"', () => {
-    const md = '# Findings\n\nText.\n\n# Actions\n\nDo this.';
-    const result = detectRecommendationSections(md);
-    expect(result.mode).toBe('sections');
-    expect(result.processText).toContain('# Actions');
+  it('detects actions, action plans and priorities', () => {
+    for (const heading of ['# Actions', '## Action plan', '### Priorities']) {
+      const md = `# Findings\n\nText.\n\n${heading}\n\nDo this.`;
+      const result = detectRecommendationSections(md);
+      expect(result.mode).toBe('sections');
+      expect(result.processText).toContain('Do this.');
+    }
   });
 
   it('detects "# We will" as a commitment-style section', () => {
@@ -44,6 +69,13 @@ describe('detectRecommendationSections', () => {
     const result = detectRecommendationSections(md);
     expect(result.mode).toBe('sections');
     expect(result.processText).toContain('We will');
+  });
+
+  it('detects "What we recommend"', () => {
+    const md = '# Context\n\nText.\n\n## What we recommend\n\nCreate a shared standard.';
+    const result = detectRecommendationSections(md);
+    expect(result.mode).toBe('sections');
+    expect(result.processText).toContain('What we recommend');
   });
 
   it('concatenates multiple matched sections', () => {
@@ -54,10 +86,9 @@ describe('detectRecommendationSections', () => {
     expect(result.processText).toContain('# Next steps');
   });
 
-  it('stops each section at the next non-recommendation major heading', () => {
-    const md = '# Recommendations\n\n1. X.\n\n# Appendix\n\nDo not include.';
+  it('stops a recommendation section at a nested non-recommendation heading', () => {
+    const md = '## Recommendations\n\n1. X.\n\n## Appendix\n\nDo not include.';
     const result = detectRecommendationSections(md);
-    expect(result.mode).toBe('sections');
     expect(result.processText).toContain('1. X.');
     expect(result.processText).not.toContain('Do not include');
   });
