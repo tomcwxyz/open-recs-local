@@ -1,12 +1,12 @@
 # Local ingest reliability roadmap
 
 > Date: 2026-09-13  
-> Status: active  
+> Status: active — Tranches 1–3 implemented in PR #24; real-provider benchmarking and recovery are next  
 > Primary target: reliable end-to-end ingest on a 16 GB Apple Silicon Mac mini
 
 ## Why this exists
 
-The application architecture is sound, but the local ingest path has accumulated several workarounds that make the real workflow less reliable than the fake-provider test suite suggests. The current local path can fail for reasons that have nothing to do with recommendation quality: app/worker storage visibility, progress-channel wiring, Docling worker instability, long-context structured generation, and local model contention.
+The application architecture is sound, but the local ingest path accumulated several workarounds that made the real workflow less reliable than the fake-provider test suite suggested. The local path could fail for reasons that had nothing to do with recommendation quality: app/worker storage visibility, progress-channel wiring, Docling worker instability, long-context structured generation, and local model contention.
 
 This roadmap treats local ingest as a system rather than a model-selection problem.
 
@@ -24,7 +24,7 @@ PDF
   -> ready
 ```
 
-Docling remains available for documents where layout fidelity is worth the extra cost, but should not be the compulsory first step for every PDF.
+Docling remains available for documents where layout fidelity is worth the extra cost, but is no longer intended to be the compulsory first step for every local PDF.
 
 ## Guiding principles
 
@@ -40,145 +40,101 @@ Docling remains available for documents where layout fidelity is worth the extra
 
 ## Phase A — deterministic reliability fixes
 
-These are release blockers because they can make a healthy pipeline appear broken or can stop it before OCR/LLM work begins.
+These were release blockers because they could make a healthy pipeline appear broken or stop it before parser/LLM work began.
 
-### A1. Shared filesystem path in Docker
+### A1. Shared filesystem path in Docker — implemented
 
-Current compose mounts the shared upload volume at `/data/uploads`, while the default env points `STORAGE_FS_PATH` at `./.data/uploads`. In separate app/worker containers that resolves to separate container filesystems.
+Compose now overrides `STORAGE_FS_PATH=/data/uploads` for both app and worker while native development retains `./.data/uploads`. The topology distinction is documented explicitly.
 
-**Implement:**
+**Remaining acceptance:** add/retain an integration-level proof that a file written by the app-side storage provider is readable by the worker-side provider in the container topology.
 
-- override `STORAGE_FS_PATH=/data/uploads` for both app and worker in `docker-compose.yml`;
-- keep `./.data/uploads` as the correct native-development default;
-- document the distinction explicitly;
-- add a compose-level or integration regression test proving the worker can read a file written by the app-side storage provider.
+### A2. Pipeline progress channel identity — implemented
 
-**Exit criterion:** a PDF uploaded by the app container is readable by the worker container without relying on host bind mounts.
+Handlers emit progress keyed by `sourceId`; the upload UI now subscribes with the same stable source pipeline identity instead of the initial pg-boss job id. This allows parse -> extract -> embed to remain on one stream.
 
-### A2. Pipeline progress channel identity
+**Later cleanup:** rename `/api/jobs/{sourceId}/stream` to a pipeline/source-oriented route while keeping compatibility if useful.
 
-Handlers intentionally emit progress keyed by `sourceId`, while the upload UI currently subscribes with the initial pg-boss `jobId`. Later stages also have different job IDs, so the source is the only stable pipeline identity.
+### A3. Local configuration drift — implemented
 
-**Implement:**
+`DOCLING_BASE_URL` is now consistent across code/env/docs. Native and container topologies are documented separately, and the runbook no longer starts overlapping native/container app stacks.
 
-- make the upload UI subscribe to `/api/jobs/{sourceId}/stream`;
-- rename internal variables/comments from `jobId` to `channelId` where practical;
-- add a UI/unit test covering source-id subscription;
-- longer term rename the route to `/api/pipeline/{sourceId}/stream` while keeping compatibility if needed.
+**Remaining improvement:** provider diagnostics should eventually expose effective provider/model/base URL and meaningful real parsing/structured-output probes, not only lightweight connectivity checks.
 
-**Exit criterion:** parse -> extract -> embed progress is visible in one uninterrupted stream.
+### A4. Local LLM concurrency and deadlines — implemented
 
-### A3. Local configuration drift
+Local extraction now runs heavyweight stages sequentially. Structured extraction defaults to temperature `0`, and every primary/fallback attempt receives its own bounded timeout rather than sharing a single expiring deadline. Hosted mode can still overlap independent work where that is useful.
 
-Current docs and env examples have drifted (`DOCLING_URL` vs `DOCLING_BASE_URL`, mixed native/Docker instructions, claims that OCR/table extraction are enabled when the adapter disables both).
+The recommended Mac mini Ollama profile is:
 
-**Implement:**
+```bash
+OLLAMA_NUM_PARALLEL=1 \
+OLLAMA_MAX_LOADED_MODELS=1 \
+OLLAMA_FLASH_ATTENTION=1 \
+ollama serve
+```
 
-- standardise on `DOCLING_BASE_URL`;
-- update `.env.example`, README and `docs/running-locally.md`;
-- document two supported local topologies clearly:
-  - native app/worker + native Ollama + optional OCR service;
-  - Docker app/worker/Postgres + host Ollama + optional OCR sidecar;
-- make provider diagnostics show the effective provider/base URL/model and whether app/worker can reach it.
-
-**Exit criterion:** copying the documented setup produces the same topology the docs describe.
-
-### A4. Local LLM concurrency and deadlines
-
-Pass 1 metadata and Pass 2 recommendation extraction currently run concurrently. That is useful for cloud APIs but a poor default on 16 GB local hardware because it increases Ollama queueing/peak memory while both requests share tight deadlines.
-
-**Implement:**
-
-- run heavyweight extract calls sequentially in `APP_MODE=local`;
-- retain parallel execution for hosted/cloud deployments initially;
-- record stage durations and provider/model names;
-- revisit timeout semantics so a fallback generation receives its own bounded attempt budget rather than consuming the remainder of one shared deadline;
-- recommend `OLLAMA_NUM_PARALLEL=1` for the local profile.
-
-**Exit criterion:** one real local source can complete extraction repeatedly without contention-induced timeout/hang behaviour.
+**Remaining acceptance:** exercise repeated real-source runs on the target machine and record duration/memory rather than relying only on fake-provider CI.
 
 ---
 
 ## Phase B — replace compulsory Docling with adaptive parsing
 
-### B1. Introduce a page-aware parser contract
+### B1. Page-aware parser contract — implemented
 
-The existing `OcrProvider` name is too narrow for a parser that may simply extract a text layer.
-
-Do not break callers immediately. Introduce a document parser service above OCR providers:
-
-```ts
-interface DocumentParser {
-  parseDocument(input): Promise<ParsedDocument>;
-}
-```
+A `DocumentParser` contract now sits at the ingest boundary. `OcrProvider` remains a compatibility alias while config/admin surfaces still use `OCR_PROVIDER`, avoiding a flag-day rename.
 
 `ParsedDocument` remains the canonical downstream shape: document markdown, ordered pages, page number, markdown/text, image refs and parser metadata.
 
-### B2. Fast path: existing PDF text layer
+### B2. Fast path: existing PDF text layer — implemented
 
-Add a lightweight local parser using a mature PDF text extractor (benchmark PDF.js already in the dependency graph vs Poppler/pdftotext).
+The native `tesseract-pdf` provider first uses Poppler `pdftotext` page by page. It records page numbers and applies a conservative text-quality gate. Born-digital PDFs with usable text return immediately without OCR.
 
-For each page collect:
+### B3. OCR fallback only for pages that need it — implemented, benchmark pending
 
-- extracted text/markdown;
-- page number;
-- character/word count;
-- basic quality signals (empty/sparse page, high replacement-character rate, implausible glyph stream).
+`tesseract-pdf` is now a real provider backed by OCRmyPDF/Tesseract rather than an advertised-but-unwired option.
 
-### B3. OCR fallback only for pages that need it
+Current strategy:
 
-Implement the currently-advertised `tesseract-pdf` path properly, preferably via OCRmyPDF/Tesseract rather than invoking Tesseract directly on PDFs.
+- extract the existing text layer with Poppler;
+- identify sparse pages deterministically;
+- call OCRmyPDF with `--pages <sparse pages>` and `--force-ocr` so a tiny/broken existing text layer does not suppress OCR;
+- use `--output-type pdf --optimize 0` so unselected pages change as little as possible;
+- default OCRmyPDF to one worker on the 16 GB target;
+- extract the repaired PDF with Poppler again;
+- record both the pages selected for OCR and any pages that remain sparse after OCR.
 
-Strategy:
+The native macOS install path is `brew install poppler ocrmypdf`. Apple Vision/OcrMac remains a possible benchmark candidate, not a dependency.
 
-- digital pages: use text-layer output;
-- empty/sparse pages: OCR;
-- optionally OCR the whole document when the majority of pages are scanned;
-- preserve page numbering when combining outputs.
+### B4. Keep Docling as a fidelity provider — partially implemented
 
-On macOS, separately benchmark Apple Vision OCR as a potential native provider. Keep it optional until quality and packaging are understood.
+Docling remains available explicitly. The adapter already uses conservative 50-page chunking, image placeholders, `do_ocr=false` and `do_table_structure=false` after real mixed-layout reports crashed the worker pool. A per-chunk HTTP timeout is now implemented.
 
-### B4. Keep Docling as a fidelity provider
+Still to do:
 
-Docling should remain available for documents where tables/layout/reading order materially matter.
+- benchmark whether 50-page chunks remain appropriate on 16 GB hardware;
+- add explicit parser presets/modes such as `adaptive` and `docling-high-fidelity` if the benchmark justifies them;
+- surface fidelity/OCR/table settings in diagnostics;
+- pin/test a Docling image version rather than relying indefinitely on a floating image.
 
-Tasks:
-
-- add explicit modes/presets (`fast`, `adaptive`, `docling-high-fidelity`);
-- add a per-request timeout to Docling calls;
-- reduce chunk size if benchmarking shows 50-page chunks remain unstable on 16 GB hardware;
-- surface whether OCR/table recognition is enabled rather than describing all Docling runs as OCR;
-- do not silently fall back from a high-fidelity request without recording the fallback.
-
-**Exit criterion for Phase B:** digital, scanned and mixed PDFs all produce page-aware canonical content without requiring full Docling for ordinary digital reports.
+**Phase B acceptance status:** code paths now exist for digital, scanned and mixed PDFs without making Docling compulsory. Real-corpus validation is the remaining gate.
 
 ---
 
 ## Phase C — redesign recommendation extraction for local models
 
-The current fallback sends up to 30,000 characters from the start of the document when recommendation headings are not detected. This can never find recommendations near the end of a long report.
+### C1. Stop full-document head truncation — implemented for newly parsed real sources
 
-### C1. Stop full-document head truncation
+Real sources with `source_pages` no longer depend on the first 30,000 characters. The old combined path is retained only for fixture-backed fake-provider tests and legacy sources without page rows.
 
-Replace the first-30k fallback with page/chunk processing. Never discard the tail of a document solely because it exceeds one prompt budget.
+### C2. Improve deterministic candidate discovery — implemented as a secondary/legacy aid
 
-### C2. Improve deterministic candidate discovery
+Section recognition now handles H1-H3 headings, key recommendations, recommendations for named audiences, numbered recommendations, actions, action plans, priorities, next steps, commitments and conclusions-and-recommendations. Generic `Summary` and plain `Conclusions` no longer cause false positive recommendation-section mode.
 
-Broaden recommendation-section recognition to handle:
+This detector is not the gate for the real page-aware path; page windows scan the whole source.
 
-- H1/H2/H3 headings;
-- `Recommendations for ...`;
-- `Key recommendations`;
-- numbered `Recommendation 1`, `Recommendation 2`, etc.;
-- `Actions`, `Priorities`, `Next steps`, commitments and conclusions/recommendations;
-- common table/list presentations.
+### C3. Page-window extraction — implemented
 
-Use this only to prioritise likely pages, not as the sole gate for extraction.
-
-### C3. Page-window extraction
-
-Feed small ordered windows to the model, for example 4-8 pages at a time, with explicit markers:
+Real parsed sources are split into bounded ordered windows with explicit page markers:
 
 ```text
 [PAGE 17]
@@ -187,35 +143,42 @@ Feed small ordered windows to the model, for example 4-8 pages at a time, with e
 ...
 ```
 
-Return recommendation candidates with source page spans. Overlap adjacent windows by one page and deduplicate candidates afterwards.
+Current defaults are six pages / ~12,000 characters, one-page overlap. Pathological single pages are split into overlapping character fragments rather than losing their tail. Page anchors are validated against the actual pages present in the window.
 
-### C4. Separate identification from enrichment
+### C4. Separate identification from enrichment — implemented
 
-The model currently has to identify recommendations and simultaneously produce multiple taxonomy axes, timescale, target organisation, notes, confidence and page anchors.
+The real path is now:
 
-Split this into:
+1. **candidate extraction** — title/body/page span only;
+2. **deduplication** — normalised title + body across overlapping windows;
+3. **enrichment** — taxonomy, audience, purpose, location, priority, organisation, confidence in batches of eight;
+4. **source metadata** — independent source-level pass.
 
-1. **candidate extraction** — title/body/page span;
-2. **enrichment** — taxonomy, audience, purpose, location, priority, organisation, confidence;
-3. **source metadata** — independent source-level pass.
+Enrichment joins back by deterministic `candidate_index` and cannot rewrite candidate title/body/page provenance. Missing enrichment keeps the recommendation and marks it low-confidence/untagged for later review instead of silently dropping it.
 
-This reduces structured-output complexity and makes small local models more viable.
+### C5. Better structured-output handling — partially implemented
 
-### C5. Better structured-output handling
+Implemented:
 
-- temperature 0 for extraction/enrichment;
-- validate every response;
-- store actionable validation errors;
-- retry only the failed chunk/pass rather than the whole source;
-- retain raw model response in debug mode (content-safe/local only) to diagnose schema failures.
+- temperature `0` default for structured extraction;
+- schema validation through the provider boundary;
+- fresh bounded timeout for every schema/JSON fallback attempt;
+- uploaded/document text explicitly treated as untrusted source material in metadata, candidate and enrichment prompts;
+- page-window and enrichment progress is surfaced separately.
 
-**Exit criterion:** long reports can yield recommendations from any page, with reliable page provenance, using bounded local prompts.
+Still to do:
+
+- persist actionable structured-output validation/failure details;
+- retry only the failed chunk/pass instead of re-running the whole `source.extract` job;
+- optionally retain raw local debug model responses behind an explicit safe/debug setting.
+
+**Phase C acceptance status:** the architecture is in place. The real-report benchmark must now determine recall, false positives, page accuracy, window size and model choice.
 
 ---
 
 ## Phase D — local model and embedding benchmark
 
-Do this after Phases A-C so models are compared against a sane workload.
+Do this now that Phases A-C have removed most avoidable pipeline noise.
 
 Benchmark at least:
 
@@ -243,10 +206,10 @@ Measure:
 - wall-clock per stage;
 - peak memory;
 - retries/timeouts;
-- OCR/text quality;
+- text/OCR quality including `remainingSparsePageNumbers`;
 - total time-to-ready.
 
-Use benchmark data to set the default local model, prompt/window sizes and OCR strategy. Do not choose defaults by model reputation alone.
+Use benchmark data to set the default local model, prompt/window sizes and parser strategy. Do not choose defaults by model reputation alone.
 
 ---
 
@@ -269,7 +232,7 @@ Add durable stage state rather than only a single `sources.status` value. At min
 Support retry actions for:
 
 - parse only;
-- extraction only;
+- candidate extraction only;
 - enrichment only;
 - embedding only;
 - full reprocess when explicitly requested.
@@ -294,7 +257,7 @@ The UI should say which stage failed and what to do next.
 
 ## Phase F — real-provider testing
 
-Keep the deterministic fake-provider suite, but add a separate opt-in/local CI profile.
+Keep the deterministic fake-provider suite, but add a separate opt-in/local profile.
 
 ### F1. Real parser smoke tests
 
@@ -318,72 +281,82 @@ It does not need to be part of every PR CI run, but should gate local release ca
 
 # Parallel release-quality work from the wider repo review
 
-These should continue alongside the ingest work, but not distract from Phases A-C.
+These should continue alongside the ingest work, but should not distract from the real-provider benchmark and recovery work.
 
 ## Release correctness
 
-- fix react-pdf server evaluation (`DOMMatrix is not defined`) with client-only dynamic loading;
-- repair access-vs-ownership semantics for private sources; approval should grant access rather than unexpectedly transfer ownership;
-- centralise source read/edit authorisation in repository policy functions;
-- strengthen hosted E2E assertions and isolate retries/state;
-- require green local + hosted CI before release/tagging;
-- update stale README/PLAN/STATE/CLAUDE release state.
+- [x] fix react-pdf server evaluation (`DOMMatrix is not defined`) with client-only dynamic loading;
+- [ ] repair access-vs-ownership semantics for private sources; approval should grant access rather than unexpectedly transfer ownership;
+- [ ] centralise source read/edit authorisation in repository policy functions;
+- [ ] strengthen hosted E2E assertions and isolate retries/state;
+- [ ] require green local + hosted CI before release/tagging;
+- [ ] update stale README/PLAN/STATE/CLAUDE release state.
 
 ## Hosted hardening
 
-- bounded/user-aware rate limiting for expensive endpoints;
-- do not trust arbitrary forwarded IP headers outside known proxy topology;
-- sanitise 500 responses instead of exposing provider/database details;
-- harden RAG prompts against instructions inside uploaded documents;
-- add upload compensation/failed-stage cleanup;
-- improve provider connection tests and embedding dimension validation.
+- [ ] bounded/user-aware rate limiting for expensive endpoints;
+- [ ] do not trust arbitrary forwarded IP headers outside known proxy topology;
+- [ ] sanitise 500 responses instead of exposing provider/database details;
+- [x] harden extraction prompts against instructions inside uploaded documents;
+- [ ] add upload compensation/failed-stage cleanup;
+- [ ] improve provider connection tests and embedding dimension validation.
 
 ## Search and product quality
 
-- benchmark hybrid retrieval on a realistic corpus;
-- make RRF candidate pool scale with requested result depth instead of a fixed 100 forever;
-- document English-only FTS or add language configuration when needed;
-- revisit network visualisation only after ingest/search quality is measurable.
+- [ ] benchmark hybrid retrieval on a realistic corpus;
+- [ ] make RRF candidate pool scale with requested result depth instead of a fixed 100 forever;
+- [ ] document English-only FTS or add language configuration when needed;
+- [ ] revisit network visualisation only after ingest/search quality is measurable.
 
 ---
 
 # Implementation order
 
-## Tranche 1 — now
+## Tranche 1 — deterministic local reliability
 
-- [ ] A1 shared Docker storage path
-- [ ] A2 source-id SSE subscription
-- [ ] A3 config/docs corrections
-- [ ] A4 sequential heavyweight LLM extraction in local mode
-- [ ] tests for the above
+- [x] A1 shared Docker storage path
+- [x] A2 source-id SSE subscription
+- [x] A3 config/docs corrections
+- [x] A4 sequential heavyweight LLM extraction in local mode
+- [x] regression/unit coverage for the above
 
-## Tranche 2
+## Tranche 2 — adaptive parsing
 
-- [ ] parser abstraction above OCR provider
-- [ ] text-layer parser
-- [ ] implement `tesseract-pdf` via OCRmyPDF/Tesseract
-- [ ] adaptive page-level OCR decision
-- [ ] Docling timeout/fidelity mode
+- [x] parser abstraction above OCR provider
+- [x] text-layer-first Poppler parser
+- [x] implement `tesseract-pdf` via OCRmyPDF/Tesseract
+- [x] targeted sparse-page OCR decision + page selection
+- [x] Docling request timeout
+- [ ] benchmark Docling chunk size and add explicit fidelity presets if justified
+- [ ] pin/test Docling image version
 
-## Tranche 3
+## Tranche 3 — local-model-friendly extraction
 
-- [ ] page-aware extraction windows
-- [ ] expanded candidate/section detection
-- [ ] candidate/enrichment split
-- [ ] deduplication across overlapping windows
-- [ ] page-provenance tests
+- [x] page-aware extraction windows
+- [x] expanded candidate/section detection
+- [x] candidate/enrichment split
+- [x] deduplication across overlapping windows
+- [x] page-provenance validation/tests
+- [x] temperature-zero structured extraction + independent fallback deadlines
+- [x] prompt-injection guard for untrusted document/candidate text
 
-## Tranche 4
+## Tranche 4 — next: benchmark and real-stack acceptance
 
-- [ ] benchmark harness + real report corpus
+- [ ] benchmark harness + real report corpus manifest
+- [ ] real parser smoke test (Poppler + OCRmyPDF/Tesseract)
+- [ ] real Ollama structured-output smoke test
+- [ ] end-to-end real local-stack command
+- [ ] compare Llama 3.1 8B / Qwen 3.5 4B / Qwen 3.5 9B
 - [ ] choose local default model from evidence
 - [ ] tune context/window/timeouts/embedding batch sizes
 
-## Tranche 5
+## Tranche 5 — recovery and release readiness
 
-- [ ] durable stage attempts + retry UI
-- [ ] real-provider smoke profile
+- [ ] durable stage attempts + stage timings/provider metadata
+- [ ] stage-specific retries (parse/candidate/enrichment/embed)
+- [ ] actionable failure taxonomy/UI
 - [ ] local release checklist
+- [ ] resolve hosted access/ownership semantics and restore fully green hosted E2E
 
 ---
 
