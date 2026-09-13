@@ -55,6 +55,14 @@ describe('detectRecommendationSections', () => {
     expect(result.processText).toContain('Conclusions and recommendations');
   });
 
+  it('does not treat generic Summary or Conclusions as recommendation sections', () => {
+    for (const heading of ['# Summary', '## Conclusions']) {
+      const md = `# Findings\n\nDescriptive findings.\n\n${heading}\n\nThis summarises the report.`;
+      const result = detectRecommendationSections(md);
+      expect(result.mode).toBe('full-document');
+    }
+  });
+
   it('detects actions, action plans and priorities', () => {
     for (const heading of ['# Actions', '## Action plan', '### Priorities']) {
       const md = `# Findings\n\nText.\n\n${heading}\n\nDo this.`;
