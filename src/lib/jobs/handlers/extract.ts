@@ -51,6 +51,7 @@ import {
   recommendationsThematicAreas,
 } from '@/lib/db/schema';
 import type { RepoContext } from '@/lib/repositories/types';
+import { emitCruxAIInvocation } from '@/lib/crux/observe';
 
 const MAX_PASS1_MARKDOWN = 10_000;
 // Pass 2 used to truncate at 100k chars (~25k tokens), which is more than
@@ -193,6 +194,20 @@ export async function extractHandler(
 
     const metadata: SourceMetadataOutput = pass1Result.value;
     const recs: RecommendationInput[] = pass2Result.value.recommendations;
+
+    // CRUX discovery-first observation hook. This is opt-in and metadata-only:
+    // the helper is a no-op unless explicit CRUX environment configuration is present,
+    // and delivery failures never fail extraction.
+    void emitCruxAIInvocation({
+      workflow: 'source.extract',
+      provider: ctx.providers.llm.name,
+      operation: 'source_metadata_extract',
+    });
+    void emitCruxAIInvocation({
+      workflow: 'source.extract',
+      provider: ctx.providers.llm.name,
+      operation: 'recommendation_extract',
+    });
 
     // ----- Source metadata (from Pass 1) — all 5 axes in parallel ---------
     await ctx.db
