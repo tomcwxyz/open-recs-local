@@ -51,3 +51,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local ingest benchmark outputs + private corpus
+/benchmarks/local-ingest/results/
+/benchmarks/local-ingest/private/
+/benchmarks/local-ingest/corpus.local.json
