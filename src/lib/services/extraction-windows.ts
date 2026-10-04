@@ -21,8 +21,8 @@ export type ExtractionWindowOptions = {
 type RecommendationWithProvenance = {
   title: string;
   body: string;
-  page_start?: number | null;
-  page_end?: number | null;
+  page_start?: number | null | undefined;
+  page_end?: number | null | undefined;
 };
 
 const DEFAULT_MAX_PAGES = 6;
