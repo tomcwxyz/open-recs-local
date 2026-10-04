@@ -24,6 +24,8 @@ import {
   requestSourceAccess,
   withdrawSourceAccessRequest,
 } from './actions';
+import { listSourcePipelineAttempts } from '@/lib/repositories/source-pipeline-attempt';
+import { PipelineHistory } from '@/components/sources/pipeline-history';
 
 export const dynamic = 'force-dynamic';
 
@@ -72,11 +74,22 @@ export default async function SourceDetailPage({ params }: PageProps) {
       throw err;
     }
 
+    const canSeePipelineDiagnostics =
+      ctx.auth.isSystem ||
+      ctx.auth.roles.includes('admin') ||
+      ctx.auth.roles.includes('editor');
+    const pipelineAttempts = canSeePipelineDiagnostics
+      ? await listSourcePipelineAttempts(ctx, data.source.id, 12)
+      : [];
+
     if (!data.originalPdfKey) {
       return (
-        <div className="space-y-2">
+        <div className="space-y-4">
           <h1 className="text-2xl font-semibold tracking-tight">{data.source.title}</h1>
           <p className="text-muted-foreground">This source is still being processed. Check back shortly.</p>
+          {canSeePipelineDiagnostics && (
+            <PipelineHistory attempts={pipelineAttempts} showErrorDetails />
+          )}
         </div>
       );
     }
@@ -143,6 +156,9 @@ export default async function SourceDetailPage({ params }: PageProps) {
             <TagChips tags={roles} />
             <TagChips tags={audiences} />
           </div>
+        )}
+        {canSeePipelineDiagnostics && (
+          <PipelineHistory attempts={pipelineAttempts} showErrorDetails />
         )}
         <SourceViewer title={data.source.title} pages={pages} pdfUrl={pdfUrl} />
       </div>

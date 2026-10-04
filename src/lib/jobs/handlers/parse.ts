@@ -2,6 +2,11 @@ import { and, asc, eq } from 'drizzle-orm';
 import type { JobContext } from '../context';
 import type { QueuePayloads } from '../types';
 import { sourceFiles, sourcePages, sources } from '@/lib/db/schema';
+import {
+  failSourcePipelineAttempt,
+  startSourcePipelineAttempt,
+  succeedSourcePipelineAttempt,
+} from '@/lib/repositories/source-pipeline-attempt';
 
 /**
  * `source.parse` handler.
@@ -41,6 +46,13 @@ export async function parseHandler(
   payload: QueuePayloads['source.parse'],
 ): Promise<void> {
   const { sourceId } = payload;
+  const parser = ctx.providers.parser ?? ctx.providers.ocr;
+  const attempt = await startSourcePipelineAttempt(ctx.db, {
+    sourceId,
+    stage: 'parse',
+    provider: parser.name,
+  });
+
   try {
     await ctx.emit(sourceId, { type: 'phase', phase: 'parsing' });
 
@@ -78,7 +90,6 @@ export async function parseHandler(
     // still use OCR_PROVIDER. New provider factories expose the same instance
     // as `parser`, which better describes text-layer and layout parsers that
     // may perform no OCR at all.
-    const parser = ctx.providers.parser ?? ctx.providers.ocr;
     const parsed = await parser.parseDocument({ filename, bytes });
 
     // Page inserts + sources update land together. If any page insert fails
@@ -108,10 +119,15 @@ export async function parseHandler(
         .where(eq(sources.id, sourceId));
     });
 
-    // Only hand off once the write above commits — otherwise the next
-    // handler could race us and find a half-written source.
+    await succeedSourcePipelineAttempt(ctx.db, attempt, {
+      pageCount: parsed.pages.length,
+      parserMetadata: parsed.metadata,
+    });
+    // Only hand off once the write + attempt completion above commits —
+    // otherwise the next handler could race us and find half-written state.
     await ctx.queue.enqueue('source.extract', { sourceId });
   } catch (err) {
+    await failSourcePipelineAttempt(ctx.db, attempt, err).catch(() => {});
     const message = err instanceof Error ? err.message : String(err);
     // Best-effort: surface the error on the event stream and mark the row
     // failed. Swallow any secondary failures so the original error still

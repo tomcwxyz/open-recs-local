@@ -26,6 +26,8 @@ export type LlmStructuredOutput<T> = {
 
 export interface LlmProvider {
   readonly name: string;
+  /** Concrete model id where the provider has one (useful for durable run provenance). */
+  readonly model?: string;
   generateText(input: LlmTextInput): Promise<LlmTextOutput>;
   generateStructured<T>(input: LlmStructuredInput<T>): Promise<LlmStructuredOutput<T>>;
 }

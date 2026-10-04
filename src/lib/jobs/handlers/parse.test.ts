@@ -11,7 +11,7 @@ import { createQueue, type Queue } from '@/lib/jobs/queue';
 import { emitJobEvent, subscribeJobEvents } from '@/lib/jobs/events';
 import { createProviders, type Providers } from '@/lib/providers';
 import type { JobContext, JobEvent } from '@/lib/jobs/context';
-import { sourceFiles, sourcePages, sources } from '@/lib/db/schema';
+import { sourceFiles, sourcePages, sourcePipelineAttempts, sources } from '@/lib/db/schema';
 import type { OcrProvider, ParsedDocument } from '@/lib/providers/ocr/types';
 import { parseHandler } from './parse';
 
@@ -112,6 +112,18 @@ describe('source.parse handler', () => {
       `select data from pgboss.job where name = 'source.extract' and data->>'sourceId' = '${sourceId}'`,
     );
     expect(rows.length).toBe(1);
+
+    const [attempt] = await dbClient.db
+      .select()
+      .from(sourcePipelineAttempts)
+      .where(eq(sourcePipelineAttempts.sourceId, sourceId));
+    expect(attempt).toMatchObject({
+      stage: 'parse',
+      attempt: 1,
+      status: 'succeeded',
+      provider: 'fake',
+    });
+    expect(attempt?.durationMs).toBeTypeOf('number');
   }, 60_000);
 
   it('failure path: OCR throws -> status=failed, error event emitted, no extract enqueued', async () => {
@@ -146,6 +158,18 @@ describe('source.parse handler', () => {
       .from(sources)
       .where(eq(sources.id, sourceId));
     expect(row?.status).toBe('failed');
+
+    const [attempt] = await dbClient.db
+      .select()
+      .from(sourcePipelineAttempts)
+      .where(eq(sourcePipelineAttempts.sourceId, sourceId));
+    expect(attempt).toMatchObject({
+      stage: 'parse',
+      status: 'failed',
+      provider: 'failing-fake',
+      errorCategory: 'unknown',
+      retrySafe: false,
+    });
 
     expect(events.some((e) => e.type === 'error' && /simulated OCR failure/.test(e.message))).toBe(true);
 

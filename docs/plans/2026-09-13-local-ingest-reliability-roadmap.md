@@ -1,7 +1,7 @@
 # Local ingest reliability roadmap
 
 > Date: 2026-09-13  
-> Status: active — Tranches 1–3 implemented; Tranche 4 harness/smokes implemented, real-corpus model runs are next  
+> Status: active — Tranches 1–4 tooling implemented; Tranche 5 durable stage history/failure taxonomy underway, real-corpus model runs remain pending  
 > Primary target: reliable end-to-end ingest on a 16 GB Apple Silicon Mac mini
 
 ## Why this exists
@@ -286,10 +286,10 @@ These should continue alongside the ingest work, but should not distract from th
 ## Release correctness
 
 - [x] fix react-pdf server evaluation (`DOMMatrix is not defined`) with client-only dynamic loading;
-- [ ] repair access-vs-ownership semantics for private sources; approval should grant access rather than unexpectedly transfer ownership;
+- [x] repair access-vs-ownership semantics for private sources; approval grants access without transferring ownership;
 - [ ] centralise source read/edit authorisation in repository policy functions;
 - [ ] strengthen hosted E2E assertions and isolate retries/state;
-- [ ] require green local + hosted CI before release/tagging;
+- [x] require green local + hosted CI before release/tagging;
 - [ ] update stale README/PLAN/STATE/CLAUDE release state.
 
 ## Hosted hardening
@@ -352,11 +352,11 @@ These should continue alongside the ingest work, but should not distract from th
 
 ## Tranche 5 — recovery and release readiness
 
-- [ ] durable stage attempts + stage timings/provider metadata
+- [x] durable stage attempts + stage timings/provider metadata
 - [ ] stage-specific retries (parse/candidate/enrichment/embed)
-- [ ] actionable failure taxonomy/UI
+- [x] actionable failure taxonomy + editor/local processing-history UI
 - [ ] local release checklist
-- [ ] resolve hosted access/ownership semantics and restore fully green hosted E2E
+- [x] resolve hosted access/ownership semantics and restore fully green hosted E2E
 
 ---
 

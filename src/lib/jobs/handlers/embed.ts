@@ -8,6 +8,11 @@ import {
   sources,
 } from '@/lib/db/schema';
 import type { EmbeddingProvider } from '@/lib/providers/embedding/types';
+import {
+  failSourcePipelineAttempt,
+  startSourcePipelineAttempt,
+  succeedSourcePipelineAttempt,
+} from '@/lib/repositories/source-pipeline-attempt';
 
 /**
  * Batch size for embedding calls. 32 is small enough to keep memory bounded
@@ -49,6 +54,14 @@ export async function embedHandler(
   payload: QueuePayloads['source.embed'],
 ): Promise<void> {
   const { sourceId } = payload;
+  const attempt = await startSourcePipelineAttempt(ctx.db, {
+    sourceId,
+    stage: 'embed',
+    provider: ctx.providers.embedding.name,
+    model: ctx.providers.embedding.model,
+    metadata: { dimensions: ctx.providers.embedding.dimensions },
+  });
+
   try {
     await ctx.emit(sourceId, { type: 'phase', phase: 'embedding' });
 
@@ -137,7 +150,14 @@ export async function embedHandler(
       .where(eq(sources.id, sourceId));
 
     await ctx.emit(sourceId, { type: 'phase', phase: 'ready' });
+    await succeedSourcePipelineAttempt(ctx.db, attempt, {
+      dimensions: ctx.providers.embedding.dimensions,
+      recommendationCount: pendingRecs.length,
+      pageCount: pendingPages.length,
+      embeddedCount: total,
+    });
   } catch (err) {
+    await failSourcePipelineAttempt(ctx.db, attempt, err).catch(() => {});
     const message = err instanceof Error ? err.message : String(err);
     try {
       await ctx.emit(sourceId, { type: 'error', message });

@@ -11,7 +11,7 @@ import { createQueue, type Queue } from '@/lib/jobs/queue';
 import { emitJobEvent, subscribeJobEvents } from '@/lib/jobs/events';
 import { createProviders, type Providers } from '@/lib/providers';
 import type { JobContext, JobEvent } from '@/lib/jobs/context';
-import { recommendations, sourcePages, sources } from '@/lib/db/schema';
+import { recommendations, sourcePages, sourcePipelineAttempts, sources } from '@/lib/db/schema';
 import { createFakeEmbedding } from '@/lib/providers/embedding/fake';
 import type { EmbeddingProvider } from '@/lib/providers/embedding/types';
 import { embedHandler } from './embed';
@@ -186,6 +186,18 @@ describe('source.embed handler', () => {
       .where(eq(sources.id, sourceId));
     expect(sourceRow?.status).toBe('ready');
 
+    const [attempt] = await dbClient.db
+      .select()
+      .from(sourcePipelineAttempts)
+      .where(eq(sourcePipelineAttempts.sourceId, sourceId));
+    expect(attempt).toMatchObject({
+      stage: 'embed',
+      attempt: 1,
+      status: 'succeeded',
+      provider: 'fake',
+      model: 'fake-embedding-v0',
+    });
+
     expect(events.some((e) => e.type === 'phase' && e.phase === 'embedding')).toBe(true);
     expect(events.some((e) => e.type === 'phase' && e.phase === 'ready')).toBe(true);
   }, 60_000);
@@ -324,9 +336,9 @@ describe('source.embed handler', () => {
     await embedHandler(ctx, { sourceId });
     await counting.client.sql.end({ timeout: 5 });
 
-    // One bulk UPDATE for the 10 recs + one UPDATE flipping source.status.
-    // The old per-row loop issued 10 + 1 = 11.
-    expect(counting.updateCount()).toBe(2);
+    // One bulk UPDATE for the recs + source.status + the durable attempt row.
+    // The old per-row loop issued one UPDATE per recommendation.
+    expect(counting.updateCount()).toBe(3);
 
     // And the data is actually written — 768-dim vectors on every row.
     const rows = await dbClient.sql<{ dim: number }[]>`
@@ -351,8 +363,8 @@ describe('source.embed handler', () => {
     await embedHandler(ctx, { sourceId });
     await counting.client.sql.end({ timeout: 5 });
 
-    // One bulk UPDATE for the 8 pages + one UPDATE flipping source.status.
-    expect(counting.updateCount()).toBe(2);
+    // One bulk UPDATE for pages + source.status + the durable attempt row.
+    expect(counting.updateCount()).toBe(3);
 
     const rows = await dbClient.sql<{ dim: number }[]>`
       select array_length(embedding::real[], 1) as dim
@@ -410,6 +422,20 @@ describe('source.embed handler', () => {
       .from(sources)
       .where(eq(sources.id, sourceId));
     expect(row?.status).toBe('failed');
+
+    const [attempt] = await dbClient.db
+      .select()
+      .from(sourcePipelineAttempts)
+      .where(eq(sourcePipelineAttempts.sourceId, sourceId));
+    expect(attempt).toMatchObject({
+      stage: 'embed',
+      status: 'failed',
+      provider: 'bad',
+      model: 'bad',
+      errorCategory: 'embedding_dimension',
+      retrySafe: false,
+    });
+
     expect(events.some((e) => e.type === 'error' && /expected 768-dim/.test(e.message))).toBe(true);
   }, 60_000);
 
