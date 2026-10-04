@@ -119,13 +119,13 @@ export async function parseHandler(
         .where(eq(sources.id, sourceId));
     });
 
-    // Only hand off once the write above commits — otherwise the next
-    // handler could race us and find a half-written source.
-    await ctx.queue.enqueue('source.extract', { sourceId });
     await succeedSourcePipelineAttempt(ctx.db, attempt, {
       pageCount: parsed.pages.length,
       parserMetadata: parsed.metadata,
     });
+    // Only hand off once the write + attempt completion above commits —
+    // otherwise the next handler could race us and find half-written state.
+    await ctx.queue.enqueue('source.extract', { sourceId });
   } catch (err) {
     await failSourcePipelineAttempt(ctx.db, attempt, err).catch(() => {});
     const message = err instanceof Error ? err.message : String(err);
