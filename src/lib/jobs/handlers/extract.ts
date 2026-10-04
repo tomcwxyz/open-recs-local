@@ -65,6 +65,7 @@ import {
   recommendationsThematicAreas,
 } from '@/lib/db/schema';
 import type { RepoContext } from '@/lib/repositories/types';
+import { emitCruxAIInvocation } from '@/lib/crux/observe';
 
 const MAX_PASS1_MARKDOWN = 10_000;
 // Retained only for legacy/fake sources that do not have real source_pages.
@@ -188,13 +189,20 @@ export async function extractHandler(
     };
 
     const pass1Input = truncate(canonicalMarkdown, MAX_PASS1_MARKDOWN);
-    const runPass1 = () =>
-      ctx.providers.llm.generateStructured({
+    const runPass1 = async () => {
+      const result = await ctx.providers.llm.generateStructured({
         prompt: `Extract the source-level metadata for the following document.\n\n---\n${pass1Input}`,
         system: buildPass1Prompt(taxonomySlugs),
         schema: SourceMetadataSchema,
         key: `${fixtureKey}:metadata`,
       });
+      void emitCruxAIInvocation({
+        workflow: 'source.extract',
+        provider: ctx.providers.llm.name,
+        operation: 'source_metadata_extract',
+      });
+      return result;
+    };
 
     // The fake provider is fixture-keyed and intentionally represents one
     // whole-document response. Keep it on the legacy route even though fake
@@ -209,13 +217,20 @@ export async function extractHandler(
       section.mode === 'sections'
         ? buildPass2StrictPrompt(taxonomySlugs)
         : buildPass2LooserPrompt(taxonomySlugs);
-    const runLegacyPass2 = () =>
-      ctx.providers.llm.generateStructured({
+    const runLegacyPass2 = async () => {
+      const result = await ctx.providers.llm.generateStructured({
         prompt: `Extract every actionable recommendation from the text below.\n\n---\n${legacyPass2Input}`,
         system: legacyPass2System,
         schema: RecommendationsSchema,
         key: fixtureKey,
       });
+      void emitCruxAIInvocation({
+        workflow: 'source.extract',
+        provider: ctx.providers.llm.name,
+        operation: 'recommendation_extract',
+      });
+      return result;
+    };
 
     const windows = usePageWindows
       ? buildExtractionWindows(
@@ -242,6 +257,11 @@ export async function extractHandler(
           system: buildRecommendationCandidatePrompt(),
           schema: RecommendationCandidatesSchema,
           key: `${fixtureKey}:candidates-${window.index}`,
+        });
+        void emitCruxAIInvocation({
+          workflow: 'source.extract',
+          provider: ctx.providers.llm.name,
+          operation: 'recommendation_candidate_extract',
         });
 
         for (const recommendation of result.value.recommendations) {
@@ -285,6 +305,11 @@ export async function extractHandler(
           system: buildRecommendationEnrichmentPrompt(taxonomySlugs),
           schema: RecommendationEnrichmentsSchema,
           key: `${fixtureKey}:enrichment-${batchNumber - 1}`,
+        });
+        void emitCruxAIInvocation({
+          workflow: 'source.extract',
+          provider: ctx.providers.llm.name,
+          operation: 'recommendation_enrich',
         });
         enrichments.push(...result.value.enrichments);
       }
