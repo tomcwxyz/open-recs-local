@@ -66,6 +66,11 @@ import {
 } from '@/lib/db/schema';
 import type { RepoContext } from '@/lib/repositories/types';
 import { emitCruxAIInvocation } from '@/lib/crux/observe';
+import {
+  failSourcePipelineAttempt,
+  startSourcePipelineAttempt,
+  succeedSourcePipelineAttempt,
+} from '@/lib/repositories/source-pipeline-attempt';
 
 const MAX_PASS1_MARKDOWN = 10_000;
 // Retained only for legacy/fake sources that do not have real source_pages.
@@ -127,6 +132,13 @@ export async function extractHandler(
   payload: QueuePayloads['source.extract'],
 ): Promise<void> {
   const { sourceId } = payload;
+  const attempt = await startSourcePipelineAttempt(ctx.db, {
+    sourceId,
+    stage: 'extract',
+    provider: ctx.providers.llm.name,
+    model: ctx.providers.llm.model ?? null,
+  });
+
   try {
     await ctx.emit(sourceId, { type: 'phase', phase: 'extracting' });
 
@@ -550,7 +562,13 @@ export async function extractHandler(
       percent: 80,
       message: `extracted ${recs.length} recommendation(s) ${extractionSummary}`,
     });
+    await succeedSourcePipelineAttempt(ctx.db, attempt, {
+      recommendationCount: recs.length,
+      pageAware: usePageWindows,
+      windowCount: windows.length,
+    });
   } catch (err) {
+    await failSourcePipelineAttempt(ctx.db, attempt, err).catch(() => {});
     const message = err instanceof Error ? err.message : String(err);
     try {
       await ctx.emit(sourceId, { type: 'error', message });
