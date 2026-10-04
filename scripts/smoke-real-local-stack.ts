@@ -186,15 +186,23 @@ async function main(): Promise<void> {
     );
   } finally {
     if (sourceId) {
-      const fileRows = await client.db
-        .select({ storageKey: sourceFiles.storageKey })
-        .from(sourceFiles)
-        .where(eq(sourceFiles.sourceId, sourceId))
-        .catch(() => []);
+      let fileRows: Array<{ storageKey: string }> = [];
+      try {
+        fileRows = await client.db
+          .select({ storageKey: sourceFiles.storageKey })
+          .from(sourceFiles)
+          .where(eq(sourceFiles.sourceId, sourceId));
+      } catch {
+        fileRows = [];
+      }
       for (const file of fileRows) {
         await providers.storage.delete(file.storageKey).catch(() => undefined);
       }
-      await client.db.delete(sources).where(eq(sources.id, sourceId)).catch(() => undefined);
+      try {
+        await client.db.delete(sources).where(eq(sources.id, sourceId));
+      } catch {
+        // Disposable DB is about to be destroyed; cleanup is best-effort.
+      }
     }
     await client.sql.end({ timeout: 5 }).catch(() => undefined);
     await pg.container.stop().catch(() => undefined);
