@@ -64,17 +64,20 @@ export async function describeSourceAccess(
   const email = ctx.auth.user.email;
   if (email) {
     const existing = await ctx.db
-      .select({ id: ownershipRequests.id })
+      .select({ id: ownershipRequests.id, status: ownershipRequests.status })
       .from(ownershipRequests)
       .where(
         and(
           eq(ownershipRequests.sourceId, row.id),
           eq(ownershipRequests.requesterEmail, email),
-          eq(ownershipRequests.status, 'pending'),
         ),
       )
-      .limit(1);
-    pendingRequestId = existing[0]?.id ?? null;
+      .orderBy(desc(ownershipRequests.createdAt));
+
+    if (existing.some((request) => request.status === 'approved')) {
+      return { kind: 'visible', sourceId: row.id };
+    }
+    pendingRequestId = existing.find((request) => request.status === 'pending')?.id ?? null;
   }
   return {
     kind: 'private',
@@ -185,10 +188,10 @@ export async function listPendingOwnershipRequests(
 }
 
 /**
- * Admin-only — approve a pending request: flip the source's owner to the
- * (resolved) requester user, mark the request approved, stamp resolved_by
- * to the admin id (when uuid). The schema's `requester_email` join is the
- * only way to find the user id — look it up first.
+ * Admin-only — approve a pending request as an access grant. Ownership stays
+ * with the existing source owner; the approved request itself is the durable
+ * grant used by source visibility checks. We still resolve the requester to a
+ * user so stale requests for deleted accounts cannot be approved.
  */
 export async function approveOwnershipRequest(
   ctx: RepoContext,
@@ -197,8 +200,8 @@ export async function approveOwnershipRequest(
   if (!isAdmin(ctx)) throw new AuthorizationError('only admins can approve ownership requests');
   if (!UUID_RE.test(id)) return { ok: false, error: 'not_found' };
 
-  const found = await ctx.db.execute<{ sourceId: string; userId: string | null }>(sql`
-    SELECT orq.source_id::text AS "sourceId", u.id::text AS "userId"
+  const found = await ctx.db.execute<{ userId: string | null }>(sql`
+    SELECT u.id::text AS "userId"
     FROM ownership_requests orq
     LEFT JOIN users u ON u.email = orq.requester_email
     WHERE orq.id = ${id}::uuid AND orq.status = 'pending'
@@ -209,10 +212,13 @@ export async function approveOwnershipRequest(
   if (!row.userId) return { ok: false, error: 'no_user_for_email' };
 
   const adminId = ctx.auth.user.id && UUID_RE.test(ctx.auth.user.id) ? ctx.auth.user.id : null;
-  await ctx.db.transaction(async (tx) => {
-    await tx.execute(sql`UPDATE sources SET owner_user_id = ${row.userId}::uuid WHERE id = ${row.sourceId}::uuid`);
-    await tx.execute(sql`UPDATE ownership_requests SET status = 'approved', resolved_at = now(), resolved_by = ${adminId ? sql`${adminId}::uuid` : sql`NULL`} WHERE id = ${id}::uuid`);
-  });
+  await ctx.db.execute(sql`
+    UPDATE ownership_requests
+    SET status = 'approved',
+        resolved_at = now(),
+        resolved_by = ${adminId ? sql`${adminId}::uuid` : sql`NULL`}
+    WHERE id = ${id}::uuid AND status = 'pending'
+  `);
   return { ok: true };
 }
 

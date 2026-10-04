@@ -1,5 +1,5 @@
 import { and, asc, eq } from 'drizzle-orm';
-import { sourceFiles, sourcePages, sources } from '../db/schema';
+import { ownershipRequests, sourceFiles, sourcePages, sources } from '../db/schema';
 import { AuthorizationError, NotFoundError, type RepoContext } from './types';
 
 type SourceRow = {
@@ -15,10 +15,27 @@ function canWrite(ctx: RepoContext): boolean {
   return ctx.auth.roles.includes('admin') || ctx.auth.roles.includes('editor');
 }
 
-function canRead(ctx: RepoContext, row: SourceRow): boolean {
+async function canRead(ctx: RepoContext, row: SourceRow): Promise<boolean> {
   if (!row.isPrivate) return true;
   if (ctx.auth.isSystem) return true;
-  return row.ownerUserId !== null && ctx.auth.user.id === row.ownerUserId;
+  if (row.ownerUserId !== null && ctx.auth.user.id === row.ownerUserId) return true;
+
+  const email = ctx.auth.user.email;
+  if (!email) return false;
+
+  const grants = await ctx.db
+    .select({ id: ownershipRequests.id })
+    .from(ownershipRequests)
+    .where(
+      and(
+        eq(ownershipRequests.sourceId, row.id),
+        eq(ownershipRequests.requesterEmail, email),
+        eq(ownershipRequests.status, 'approved'),
+      ),
+    )
+    .limit(1);
+
+  return grants.length > 0;
 }
 
 export async function createSource(
@@ -60,7 +77,7 @@ export async function findSourceBySlug(
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  return canRead(ctx, row) ? row : null;
+  return (await canRead(ctx, row)) ? row : null;
 }
 
 /**
@@ -132,7 +149,7 @@ export async function findSourceFileByKey(
     isPrivate: row.isPrivate,
     ownerUserId: row.ownerUserId,
   };
-  if (!canRead(ctx, sourceRow)) return null;
+  if (!(await canRead(ctx, sourceRow))) return null;
 
   return {
     storageKey: row.storageKey,
@@ -182,7 +199,7 @@ export async function getSourceWithPagesBySlug(
     .from(sources)
     .where(eq(sources.slug, slug))
     .limit(1);
-  if (!src || !canRead(ctx, src)) throw new NotFoundError(`source not found: ${slug}`);
+  if (!src || !(await canRead(ctx, src))) throw new NotFoundError(`source not found: ${slug}`);
 
   const [pageRows, pdfRows] = await Promise.all([
     ctx.db
@@ -257,7 +274,7 @@ export async function findSourceBySlugWithMetadata(
   const row = rows[0];
   if (!row) return null;
   // The auth filter reuses `canRead` via a compatible projection shape.
-  if (!canRead(ctx, { id: row.id, slug: row.slug, title: row.title, isPrivate: row.isPrivate, ownerUserId: row.ownerUserId })) return null;
+  if (!(await canRead(ctx, { id: row.id, slug: row.slug, title: row.title, isPrivate: row.isPrivate, ownerUserId: row.ownerUserId }))) return null;
   return row;
 }
 

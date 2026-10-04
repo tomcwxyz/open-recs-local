@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { startPostgres, type StartedPg } from '../../../tests/helpers/pg-container';
 import { applyMigrations } from '../../../tests/helpers/migrate';
 import { createDb, type Db, type DbClient } from '../db/client';
@@ -173,7 +174,7 @@ describe('createOwnershipRequest', () => {
 });
 
 describe('approve / reject / withdraw', () => {
-  it('approveOwnershipRequest flips the source owner to the requester', async () => {
+  it('approveOwnershipRequest grants access without transferring source ownership', async () => {
     const ownerId = await seedUser(client.db, { email: 'or-app-owner@test' });
     const srcId = await seedPrivateSource({
       slug: 'or-app-src',
@@ -194,11 +195,24 @@ describe('approve / reject / withdraw', () => {
     );
     expect(approved.ok).toBe(true);
 
+    const [sourceRow] = await client.db
+      .select({ ownerUserId: sources.ownerUserId })
+      .from(sources)
+      .where(eq(sources.id, srcId))
+      .limit(1);
+    expect(sourceRow?.ownerUserId).toBe(ownerId);
+
     const accessAsReq = await describeSourceAccess(
       ctxUser(client.db, reqId, 'or-app-req@test'),
       'or-app-src',
     );
     expect(accessAsReq.kind).toBe('visible');
+
+    const accessAsOwner = await describeSourceAccess(
+      ctxUser(client.db, ownerId, 'or-app-owner@test'),
+      'or-app-src',
+    );
+    expect(accessAsOwner.kind).toBe('visible');
   });
 
   it('rejectOwnershipRequest sets status=rejected, no source change', async () => {

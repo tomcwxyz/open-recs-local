@@ -2,10 +2,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { SourceViewer } from './source-viewer';
 
-vi.mock('react-pdf', () => ({
-  Document: ({ children }: { children: React.ReactNode }) => <div data-testid="stub-document">{children}</div>,
-  Page: (props: { pageNumber: number }) => <div data-testid="stub-page" data-page={props.pageNumber} />,
-  pdfjs: { GlobalWorkerOptions: { workerSrc: '' } },
+vi.mock('next/dynamic', () => ({
+  default: () =>
+    function StubSourcePdfViewer({
+      activePage,
+      totalPages,
+    }: {
+      activePage: number;
+      totalPages?: number;
+    }) {
+      return (
+        <div data-testid="stub-pdf-viewer">
+          <span>
+            Page {activePage}
+            {totalPages ? ` / ${totalPages}` : ''}
+          </span>
+          {Array.from({ length: totalPages ?? 0 }, (_, index) => (
+            <div key={index + 1} data-testid="stub-page" data-page={index + 1} />
+          ))}
+        </div>
+      );
+    },
 }));
 
 beforeEach(() => {

@@ -29,10 +29,12 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Override any host-oriented DATABASE_URL in .env: inside the compose
-      # network the postgres service is reachable at hostname `postgres`,
-      # not `localhost`. Placed after env_file so this wins.
+      # Override host-oriented paths/hosts from .env inside compose. The app
+      # and worker must resolve filesystem storage to the SAME mounted volume;
+      # a relative ./.data/uploads path would point at separate container
+      # filesystems and the worker would not be able to read uploaded PDFs.
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/openrecs
+      STORAGE_FS_PATH: /data/uploads
     ports:
       - "3000:3000"
     volumes:
@@ -49,8 +51,10 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # See note on `app.environment` above.
+      # See note on `app.environment` above. Keep this path identical to the
+      # app so source.parse can read the exact blob written during upload.
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/openrecs
+      STORAGE_FS_PATH: /data/uploads
     volumes:
       - uploads:/data/uploads
     depends_on:

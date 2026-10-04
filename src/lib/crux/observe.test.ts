@@ -7,7 +7,7 @@ describe('buildCruxIngestBatch', () => {
       {
         workflow: 'source.extract',
         provider: 'local-openai-compatible',
-        operation: 'recommendation_extract',
+        operation: 'recommendation_candidate_extract',
       },
       {
         systemVersionRef: 'system-version:open-recs:0.1',
@@ -22,7 +22,7 @@ describe('buildCruxIngestBatch', () => {
     expect(batch.events[0]?.attributes).toEqual({
       workflow: 'source.extract',
       provider: 'local-openai-compatible',
-      operation: 'recommendation_extract',
+      operation: 'recommendation_candidate_extract',
     });
 
     const serialised = JSON.stringify(batch);

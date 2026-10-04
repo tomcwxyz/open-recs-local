@@ -1,12 +1,29 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { useEffect, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { useLocalStorage } from '@/lib/hooks/use-local-storage';
 import { useMediaQuery } from '@/lib/hooks/use-media-query';
 import { useScrollSync } from '@/lib/hooks/use-scroll-sync';
 import { SourceMarkdown, type SourcePage } from './source-markdown';
-import { SourcePdfViewer } from './source-pdf-viewer';
+
+// react-pdf/pdfjs touches browser-only globals (notably DOMMatrix) while its
+// module graph is evaluated. A static import from a Client Component is still
+// visible to the server/build pipeline, which caused hosted source pages to
+// crash during server evaluation. Keep the entire PDF renderer behind a
+// client-only dynamic boundary.
+const SourcePdfViewer = dynamic(
+  () => import('./source-pdf-viewer').then((module) => module.SourcePdfViewer),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full items-center justify-center">
+        <p className="text-sm text-muted-foreground">Loading PDF…</p>
+      </div>
+    ),
+  },
+);
 
 const SPLIT_KEY = 'source-viewer:split';
 // Tailwind's `md:` breakpoint is 768px. Match that here so the JS layout

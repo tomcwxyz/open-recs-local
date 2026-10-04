@@ -17,14 +17,14 @@ export type OpenAICompatLlmConfig = {
   /** Model id to request, e.g. `llama3.1:8b` or `gpt-4o-mini`. */
   model: string;
   /**
-   * Per-request timeout in milliseconds. A stuck upstream (e.g. an Ollama
+   * Per-attempt timeout in milliseconds. A stuck upstream (e.g. an Ollama
    * server that accepted the request but never streams a token) would
    * otherwise block the worker indefinitely. Defaults to 120s.
    */
   timeoutMs?: number;
 };
 
-/** Default per-request timeout — generous enough for slow local 8B models. */
+/** Default per-attempt timeout — generous enough for slow local 8B models. */
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
@@ -42,13 +42,16 @@ function unwrapCodeFence(text: string): string {
  * Covers Ollama, LM Studio, vLLM, OpenAI itself, and anything else that speaks
  * the `/v1/chat/completions` dialect.
  *
- * Structured output: we used to delegate to the AI SDK's `generateObject`,
- * but Ollama + Llama don't reliably honour the openai-compat `response_format`
- * for arbitrary JSON Schemas — the SDK warns and the response fails Zod
- * validation roughly 1-in-3 attempts. Instead we ask for JSON in the prompt,
- * unwrap any code fence the model added, parse, and validate against the
- * caller-supplied Zod schema. Retry once on failure since these models are
- * not perfectly stable on first generation.
+ * Structured output first uses the AI SDK's `generateObject` path. Providers
+ * that do not honour the compatible response-format/schema request fall back
+ * to prompt-constrained raw JSON which is parsed and validated locally.
+ *
+ * Every attempt gets its own bounded timeout. The previous implementation
+ * shared one AbortSignal across the primary call and all fallbacks; on local
+ * Ollama a queued primary could consume most of that budget, leaving the
+ * fallback only a few seconds (or an already-aborted signal) even though it
+ * was a new request. Independent deadlines keep each attempt bounded without
+ * making queue time in one attempt silently steal execution time from another.
  */
 export function createOpenAICompatLlm(config: OpenAICompatLlmConfig): LlmProvider {
   const client = createOpenAICompatible({
@@ -74,22 +77,18 @@ export function createOpenAICompatLlm(config: OpenAICompatLlmConfig): LlmProvide
     async generateStructured<T>(
       input: LlmStructuredInput<T>,
     ): Promise<LlmStructuredOutput<T>> {
-      // Primary path: AI SDK's `generateObject` sets `response_format:
-      // {type: 'json_object'}` on the request. Recent Ollama versions
-      // (0.5+) honour this cleanly even on smaller models like qwen3:8b
-      // and gemma3:12b. Falls back to the prompt-based JSON path if the
-      // structured-output call throws (older Ollama / non-JSON-mode
-      // providers).
       const schema = input.schema as z.ZodType<T>;
-      // One deadline for the whole operation (primary + fallback retries), so a
-      // stuck server can't make us pay the timeout once per attempt. Once it
-      // fires, every in-flight and subsequent AI SDK call aborts immediately.
-      const deadline = AbortSignal.timeout(timeoutMs);
+      // Deterministic extraction is substantially more reliable on small local
+      // models. Callers can override this for genuinely creative structured
+      // work, but extraction/enrichment should normally stay at zero.
+      const temperature = input.temperature ?? 0;
+
       try {
         const { object } = await generateObject({
           model,
           prompt: input.prompt,
-          abortSignal: deadline,
+          abortSignal: AbortSignal.timeout(timeoutMs),
+          temperature,
           ...(input.system !== undefined ? { system: input.system } : {}),
           schema: schema as z.ZodType<unknown>,
         });
@@ -110,7 +109,10 @@ export function createOpenAICompatLlm(config: OpenAICompatLlmConfig): LlmProvide
             model,
             prompt: input.prompt,
             system,
-            abortSignal: deadline,
+            temperature,
+            // Fresh deadline for this attempt — never reuse the primary
+            // request's elapsed/aborted signal.
+            abortSignal: AbortSignal.timeout(timeoutMs),
           });
           const unwrapped = unwrapCodeFence(text);
           let parsed: unknown;
@@ -132,7 +134,9 @@ export function createOpenAICompatLlm(config: OpenAICompatLlmConfig): LlmProvide
             `openai-compat structured: response failed schema validation: ${result.error.message}`,
           );
         }
-        throw lastErr instanceof Error ? lastErr : new Error('openai-compat structured: unknown failure');
+        throw lastErr instanceof Error
+          ? lastErr
+          : new Error('openai-compat structured: unknown failure');
       }
     },
   };
@@ -145,7 +149,9 @@ export function createOpenAICompatLlm(config: OpenAICompatLlmConfig): LlmProvide
  * when the schema is single-field-array shaped. Returns null otherwise.
  */
 function topLevelArrayField(schema: z.ZodType<unknown>): string | null {
-  const def = (schema as unknown as { _def?: { type?: string; shape?: () => Record<string, unknown> } })._def;
+  const def = (schema as unknown as {
+    _def?: { type?: string; shape?: () => Record<string, unknown> };
+  })._def;
   if (!def || def.type !== 'object' || typeof def.shape !== 'function') return null;
   const shape = def.shape();
   const keys = Object.keys(shape);

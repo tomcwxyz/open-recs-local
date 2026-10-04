@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { sources, type SourceStatus } from '../db/schema';
+import { ownershipRequests, sources, type SourceStatus } from '../db/schema';
 import type { RepoContext } from './types';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -108,10 +108,23 @@ export async function listRecentSources(
 ): Promise<RecentSource[]> {
   const limit = args.limit ?? 20;
   const viewerId = ctx.auth.user?.id;
+  const viewerEmail = ctx.auth.user.email;
   const authFilter = ctx.auth.isSystem
     ? sql`TRUE`
     : viewerId && UUID_RE.test(viewerId)
-      ? sql`(s.is_private = FALSE OR s.owner_user_id = ${viewerId}::uuid)`
+      ? viewerEmail
+        ? sql`(
+            s.is_private = FALSE
+            OR s.owner_user_id = ${viewerId}::uuid
+            OR EXISTS (
+              SELECT 1
+              FROM ${ownershipRequests} access_request
+              WHERE access_request.source_id = s.id
+                AND access_request.requester_email = ${viewerEmail}
+                AND access_request.status = 'approved'
+            )
+          )`
+        : sql`(s.is_private = FALSE OR s.owner_user_id = ${viewerId}::uuid)`
       : sql`s.is_private = FALSE`;
 
   // Build a single WHERE clause that always applies the auth filter, then
