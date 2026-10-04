@@ -23,7 +23,11 @@
     "prebuild": "tsx scripts/copy-pdf-worker.ts",
     "worker": "tsx src/worker.ts",
     "worker:dev": "tsx watch src/worker.ts",
-    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "benchmark:local-ingest": "tsx scripts/benchmark-local-ingest.ts",
+    "smoke:parser:real": "tsx scripts/smoke-real-parser.ts",
+    "smoke:ollama:real": "tsx scripts/smoke-real-ollama.ts",
+    "smoke:local-stack:real": "tsx scripts/smoke-real-local-stack.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.41",
