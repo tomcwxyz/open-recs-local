@@ -107,7 +107,7 @@ export async function succeedSourcePipelineAttempt(
   metadata?: Record<string, unknown>,
 ): Promise<void> {
   const finishedAt = new Date();
-  const update: typeof sourcePipelineAttempts.$inferInsert = {
+  const update: Partial<typeof sourcePipelineAttempts.$inferInsert> = {
     status: 'succeeded',
     finishedAt,
     durationMs: durationMs(handle, finishedAt),
@@ -128,7 +128,7 @@ export async function failSourcePipelineAttempt(
 ): Promise<void> {
   const finishedAt = new Date();
   const classified = classifyPipelineFailure(handle.stage, error);
-  const update: typeof sourcePipelineAttempts.$inferInsert = {
+  const update: Partial<typeof sourcePipelineAttempts.$inferInsert> = {
     status: 'failed',
     finishedAt,
     durationMs: durationMs(handle, finishedAt),
