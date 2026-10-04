@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "sample-report",
+      "label": "Synthetic short born-digital report",
+      "pdf": "../../fixtures/sources/sample-report.pdf",
+      "category": "short-born-digital",
+      "expected_phrases": [
+        "board-level risk committee",
+        "annual safeguarding report",
+        "external auditors"
+      ],
+      "gold": [
+        {
+          "id": "risk-committee",
+          "title": "Establish a board-level risk committee",
+          "body": "Establish a board-level risk committee to meet quarterly.",
+          "page_start": 1,
+          "page_end": 1
+        },
+        {
+          "id": "safeguarding-report",
+          "title": "Publish an annual safeguarding report",
+          "body": "Publish an annual safeguarding report within three months of year-end.",
+          "page_start": 1,
+          "page_end": 1
+        },
+        {
+          "id": "auditor-rotation",
+          "title": "Rotate external auditors regularly",
+          "body": "Rotate external auditors at least every seven financial years.",
+          "page_start": 2,
+          "page_end": 2
+        }
+      ],
+      "notes": "Sanity fixture only. The real benchmark should use corpus.local.json with the seven roadmap categories."
+    }
+  ]
+}
