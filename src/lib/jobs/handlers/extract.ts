@@ -555,7 +555,6 @@ export async function extractHandler(
       .update(sources)
       .set({ status: 'embedding', updatedAt: new Date() })
       .where(eq(sources.id, sourceId));
-    await ctx.queue.enqueue('source.embed', { sourceId });
 
     await ctx.emit(sourceId, {
       type: 'progress',
@@ -567,6 +566,7 @@ export async function extractHandler(
       pageAware: usePageWindows,
       windowCount: windows.length,
     });
+    await ctx.queue.enqueue('source.embed', { sourceId });
   } catch (err) {
     await failSourcePipelineAttempt(ctx.db, attempt, err).catch(() => {});
     const message = err instanceof Error ? err.message : String(err);
