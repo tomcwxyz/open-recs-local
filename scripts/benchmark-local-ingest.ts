@@ -161,6 +161,10 @@ function parseOptions(): BenchmarkOptions {
       path.join('benchmarks/local-ingest/results', defaultName),
   );
 
+  const windowPages = numberAfter('--window-pages');
+  const windowChars = numberAfter('--window-chars');
+  const overlapPages = numberAfter('--overlap-pages');
+
   return {
     manifestPath,
     models,
@@ -169,15 +173,9 @@ function parseOptions(): BenchmarkOptions {
     embeddingModel,
     embeddingBaseUrl,
     skipEmbeddings,
-    ...(numberAfter('--window-pages') !== undefined
-      ? { windowPages: numberAfter('--window-pages') }
-      : {}),
-    ...(numberAfter('--window-chars') !== undefined
-      ? { windowChars: numberAfter('--window-chars') }
-      : {}),
-    ...(numberAfter('--overlap-pages') !== undefined
-      ? { overlapPages: numberAfter('--overlap-pages') }
-      : {}),
+    ...(windowPages !== undefined ? { windowPages } : {}),
+    ...(windowChars !== undefined ? { windowChars } : {}),
+    ...(overlapPages !== undefined ? { overlapPages } : {}),
     matchThreshold: numberAfter('--match-threshold') ?? 0.46,
     caseIds,
     outputPath,
