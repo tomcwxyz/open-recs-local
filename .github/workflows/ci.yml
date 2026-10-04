@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Feature branches are covered by pull_request below. Restrict push CI
+  # to master so an open PR does not run the same three jobs twice.
   push:
-    branches: ['**']
+    branches: [master]
   pull_request:
     branches: [master]
 
