@@ -1,7 +1,7 @@
 # Local ingest reliability roadmap
 
 > Date: 2026-09-13  
-> Status: active — Tranches 1–3 implemented in PR #24; real-provider benchmarking and recovery are next  
+> Status: active — Tranches 1–3 implemented; Tranche 4 harness/smokes implemented, real-corpus model runs are next  
 > Primary target: reliable end-to-end ingest on a 16 GB Apple Silicon Mac mini
 
 ## Why this exists
@@ -259,17 +259,17 @@ The UI should say which stage failed and what to do next.
 
 Keep the deterministic fake-provider suite, but add a separate opt-in/local profile.
 
-### F1. Real parser smoke tests
+### F1. Real parser smoke tests — implemented, real scanned corpus run pending
 
-Run representative fixture PDFs through the actual parser/OCR process and assert page count, non-empty text and known phrases.
+`pnpm smoke:parser:real` runs the real adaptive parser, asserting page/text/known phrases. `--require-ocr` makes scanned-corpus acceptance explicitly prove OCR fallback was used.
 
-### F2. Real Ollama structured-output smoke test
+### F2. Real Ollama structured-output smoke test — implemented
 
-The current connection test asks for a trivial one-word completion. Add a structured-output probe using a small schema representative of extraction.
+`pnpm smoke:ollama:real -- --model <id>` exercises the actual recommendation-candidate prompt/schema and requires explicit page provenance, rather than accepting a trivial connectivity completion.
 
-### F3. Full local-stack smoke test
+### F3. Full local-stack smoke test — implemented
 
-A marked/optional test should run:
+`pnpm smoke:local-stack:real` creates a disposable pgvector database and filesystem store, then runs the actual parse/extract/embed handlers with real providers. It should run:
 
 ```text
 real PDF -> real parser -> real local LLM -> real embedding model -> ready
@@ -342,10 +342,10 @@ These should continue alongside the ingest work, but should not distract from th
 
 ## Tranche 4 — next: benchmark and real-stack acceptance
 
-- [ ] benchmark harness + real report corpus manifest
-- [ ] real parser smoke test (Poppler + OCRmyPDF/Tesseract)
-- [ ] real Ollama structured-output smoke test
-- [ ] end-to-end real local-stack command
+- [x] benchmark harness + real report corpus manifest
+- [x] real parser smoke test (Poppler + OCRmyPDF/Tesseract)
+- [x] real Ollama structured-output smoke test
+- [x] end-to-end real local-stack command
 - [ ] compare Llama 3.1 8B / Qwen 3.5 4B / Qwen 3.5 9B
 - [ ] choose local default model from evidence
 - [ ] tune context/window/timeouts/embedding batch sizes
