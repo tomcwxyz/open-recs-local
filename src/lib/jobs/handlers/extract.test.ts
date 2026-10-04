@@ -19,6 +19,7 @@ import {
   recommendationsTargetAudienceTypes,
   recommendationsThematicAreas,
   sourceFiles,
+  sourcePipelineAttempts,
   sources,
   sourcesPurposes,
   sourcesRoleRelevances,
@@ -117,6 +118,17 @@ describe('extractHandler — Pass 1 (source metadata)', () => {
     expect(row?.authors).toEqual(['Sample Risk Committee']);
     expect(row?.orgOwner).toBe('Sample Charity Limited');
     expect(row?.publicationDate).toBeInstanceOf(Date);
+
+    const [attempt] = await dbClient.db
+      .select()
+      .from(sourcePipelineAttempts)
+      .where(eq(sourcePipelineAttempts.sourceId, sourceId));
+    expect(attempt).toMatchObject({
+      stage: 'extract',
+      attempt: 1,
+      status: 'succeeded',
+      provider: 'fake',
+    });
   });
 
   it('persists source-side multi-axis M2M memberships from the metadata fixture', async () => {
@@ -420,5 +432,17 @@ describe('extractHandler — failure path', () => {
       .from(sources)
       .where(eq(sources.id, sourceId));
     expect(row?.status).toBe('failed');
+
+    const [attempt] = await dbClient.db
+      .select()
+      .from(sourcePipelineAttempts)
+      .where(eq(sourcePipelineAttempts.sourceId, sourceId));
+    expect(attempt).toMatchObject({
+      stage: 'extract',
+      status: 'failed',
+      provider: 'broken',
+      errorCategory: 'unknown',
+      retrySafe: false,
+    });
   });
 });
