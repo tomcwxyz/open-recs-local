@@ -64,6 +64,7 @@ export function createOpenAICompatLlm(config: OpenAICompatLlmConfig): LlmProvide
 
   return {
     name: 'openai-compat',
+    model: config.model,
     async generateText(input: LlmTextInput): Promise<LlmTextOutput> {
       const { text } = await generateText({
         model,

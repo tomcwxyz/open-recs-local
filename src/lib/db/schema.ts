@@ -146,6 +146,66 @@ export const sources = pgTable(
   }),
 );
 
+export const PIPELINE_STAGES = ['parse', 'extract', 'embed'] as const;
+export type PipelineStage = (typeof PIPELINE_STAGES)[number];
+
+export const PIPELINE_ATTEMPT_STATUS = ['running', 'succeeded', 'failed'] as const;
+export type PipelineAttemptStatus = (typeof PIPELINE_ATTEMPT_STATUS)[number];
+
+export const PIPELINE_ERROR_CATEGORIES = [
+  'storage_unreadable',
+  'parser_unavailable',
+  'parser_timeout',
+  'no_usable_text',
+  'model_unavailable',
+  'model_timeout',
+  'invalid_structured_output',
+  'embedding_dimension',
+  'embedding_context',
+  'database_persistence',
+  'unknown',
+] as const;
+export type PipelineErrorCategory = (typeof PIPELINE_ERROR_CATEGORIES)[number];
+
+/**
+ * Durable history for expensive ingest stages. A source can have many attempts
+ * per stage; attempt numbers are allocated serially by the repository.
+ *
+ * `sources.status` remains the cheap current-state projection used by the UI.
+ * This table is the audit/recovery history: what ran, with which provider/model,
+ * how long it took, and why a failed attempt stopped.
+ */
+export const sourcePipelineAttempts = pgTable(
+  'source_pipeline_attempts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    sourceId: uuid('source_id')
+      .notNull()
+      .references(() => sources.id, { onDelete: 'cascade' }),
+    stage: text('stage', { enum: PIPELINE_STAGES }).notNull(),
+    attempt: integer('attempt').notNull(),
+    status: text('status', { enum: PIPELINE_ATTEMPT_STATUS }).notNull().default('running'),
+    provider: text('provider'),
+    model: text('model'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    durationMs: integer('duration_ms'),
+    errorCategory: text('error_category', { enum: PIPELINE_ERROR_CATEGORIES }),
+    errorMessage: text('error_message'),
+    retrySafe: boolean('retry_safe').notNull().default(false),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
+  },
+  (t) => ({
+    sourceStageAttemptUnique: uniqueIndex(
+      'source_pipeline_attempts_source_stage_attempt_idx',
+    ).on(t.sourceId, t.stage, t.attempt),
+    sourceStartedIdx: index('source_pipeline_attempts_source_started_idx').on(
+      t.sourceId,
+      t.startedAt,
+    ),
+  }),
+);
+
 export const sourceFiles = pgTable('source_files', {
   id: uuid('id').primaryKey().defaultRandom(),
   sourceId: uuid('source_id')
