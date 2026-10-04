@@ -23,6 +23,8 @@ import type { OcrProvider, ParsedDocument, ParsedPage } from './types';
 export type DoclingOcrConfig = {
   /** Base URL of the Docling-serve instance, e.g. `http://docling:5001`. */
   baseUrl: string;
+  /** Per-chunk HTTP deadline. Defaults to five minutes. */
+  timeoutMs?: number;
 };
 
 type DoclingPage = {
@@ -46,6 +48,7 @@ type DoclingResponse = {
 };
 
 const IMAGE_RE = /!\[[^\]]*\]\(([^)]+)\)/g;
+const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 
 // Unique marker we ask Docling to inject between pages. Picked to be
 // unambiguous in markdown — an HTML comment doesn't render and won't collide
@@ -128,10 +131,12 @@ async function convertChunk(
   filename: string,
   bytes: Uint8Array,
   pageRange: [number, number],
+  timeoutMs: number,
 ): Promise<DoclingResponse> {
   const res = await fetch(`${baseUrl}/v1/convert/file`, {
     method: 'POST',
     body: buildConvertForm(filename, bytes, pageRange),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -145,6 +150,7 @@ async function convertChunk(
 export function createDoclingOcr(config: DoclingOcrConfig): OcrProvider {
   // Trim trailing slash so `${baseUrl}/v1/...` always yields a single slash.
   const baseUrl = config.baseUrl.replace(/\/+$/, '');
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return {
     name: 'docling',
@@ -160,7 +166,7 @@ export function createDoclingOcr(config: DoclingOcrConfig): OcrProvider {
       let start = 1;
       while (true) {
         const end = start + PAGE_CHUNK_SIZE - 1;
-        const payload = await convertChunk(baseUrl, filename, bytes, [start, end]);
+        const payload = await convertChunk(baseUrl, filename, bytes, [start, end], timeoutMs);
         if (payload.status === 'failure') {
           if (start === 1) {
             throw new Error(

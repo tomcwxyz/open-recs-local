@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import 'react-pdf/dist/Page/TextLayer.css';
 
 if (typeof window !== 'undefined') {
   // The worker is copied into public/ by scripts/copy-pdf-worker.ts at predev/prebuild.

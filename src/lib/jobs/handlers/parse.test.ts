@@ -123,7 +123,7 @@ describe('source.parse handler', () => {
         throw new Error('simulated OCR failure');
       },
     };
-    const ctx = ctxWithProviders({ ...baseProviders, ocr: failingOcr });
+    const ctx = ctxWithProviders({ ...baseProviders, parser: failingOcr, ocr: failingOcr });
 
     // Subscribe BEFORE running so we don't race the NOTIFY. Use a dedicated
     // postgres client — subscribeJobEvents issues LISTEN, which pins the
@@ -190,7 +190,7 @@ it('empty pages: OCR returns zero pages -> succeeds, no page rows, still enqueue
         return { markdown: '', pages: [], metadata: {} };
       },
     };
-    const ctx = ctxWithProviders({ ...baseProviders, ocr: emptyOcr });
+    const ctx = ctxWithProviders({ ...baseProviders, parser: emptyOcr, ocr: emptyOcr });
 
     await parseHandler(ctx, { sourceId });
 
